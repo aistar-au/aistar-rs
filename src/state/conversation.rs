@@ -8,7 +8,32 @@ use futures::StreamExt;
 use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+pub enum ConversationStreamUpdate {
+    Delta(String),
+    ToolApprovalRequest(ToolApprovalRequest),
+}
+
+pub struct ToolApprovalRequest {
+    pub tool_name: String,
+    pub input_preview: String,
+    pub response_tx: oneshot::Sender<bool>,
+}
+
+const LOCAL_DEFAULT_MAX_ASSISTANT_HISTORY_CHARS: usize = 1_200;
+const LOCAL_DEFAULT_MAX_TOOL_RESULT_HISTORY_CHARS: usize = 2_500;
+const LOCAL_DEFAULT_MAX_API_MESSAGES: usize = 14;
+const REMOTE_DEFAULT_MAX_ASSISTANT_HISTORY_CHARS: usize = 3_000;
+const REMOTE_DEFAULT_MAX_TOOL_RESULT_HISTORY_CHARS: usize = 6_000;
+const REMOTE_DEFAULT_MAX_API_MESSAGES: usize = 32;
+
+#[derive(Clone, Copy)]
+struct HistoryLimits {
+    max_assistant_history_chars: usize,
+    max_tool_result_history_chars: usize,
+    max_api_messages: usize,
+}
 
 pub struct ConversationManager {
     client: ApiClient,
@@ -42,7 +67,7 @@ impl ConversationManager {
     pub async fn send_message(
         &mut self,
         content: String,
-        stream_delta_tx: Option<&mpsc::UnboundedSender<String>>,
+        stream_delta_tx: Option<&mpsc::UnboundedSender<ConversationStreamUpdate>>,
     ) -> Result<String> {
         self.api_messages.push(ApiMessage {
             role: "user".to_string(),
@@ -50,8 +75,13 @@ impl ConversationManager {
         });
 
         let use_structured_tool_protocol = self.client.supports_structured_tool_protocol();
+        let limits = resolve_history_limits(self.client.is_local_endpoint());
+        let stream_server_events = stream_server_events_enabled();
+        let stream_local_tool_events = stream_local_tool_events_enabled();
+        let require_tool_approval = tool_approval_enabled();
         let mut rounds = 0usize;
         loop {
+            self.prune_message_history(limits.max_api_messages);
             rounds += 1;
             if rounds > 24 {
                 bail!("Exceeded max tool rounds (24). Possible tool-calling loop.");
@@ -62,6 +92,7 @@ impl ConversationManager {
             let mut assistant_text = String::new();
             let mut tool_use_blocks = Vec::new();
             let mut tool_input_buffers: Vec<Option<String>> = Vec::new();
+            let mut tool_input_event_emitted: Vec<bool> = Vec::new();
 
             while let Some(chunk_result) = stream.next().await {
                 let chunk = chunk_result?;
@@ -69,33 +100,55 @@ impl ConversationManager {
 
                 for event in events {
                     match event {
+                        StreamEvent::MessageStart { .. } => {
+                            if stream_server_events {
+                                if let Some(tx) = stream_delta_tx {
+                                    let _ = tx.send(ConversationStreamUpdate::Delta(
+                                        "\n* Event: message_start\n".to_string(),
+                                    ));
+                                }
+                            }
+                        }
                         StreamEvent::ContentBlockStart {
                             index,
                             content_block,
                         } => {
+                            if stream_server_events {
+                                if let Some(tx) = stream_delta_tx {
+                                    let event_label = match &content_block {
+                                        ContentBlock::Text { .. } => "\n* Thinking\n".to_string(),
+                                        ContentBlock::ToolUse { name, .. } => {
+                                            format!("\n* Tool: {name}\n")
+                                        }
+                                        ContentBlock::ToolResult { .. } => {
+                                            format!("\n* Event: tool_result_block#{index}\n")
+                                        }
+                                    };
+                                    let _ = tx.send(ConversationStreamUpdate::Delta(event_label));
+                                }
+                            }
+
                             let tool_name =
                                 if let ContentBlock::ToolUse { name, .. } = &content_block {
                                     Some(name.clone())
                                 } else {
                                     None
                                 };
-                            if let Some(name) = tool_name {
+                            if tool_name.is_some() {
                                 while tool_use_blocks.len() <= index {
                                     tool_use_blocks.push(None);
                                     tool_input_buffers.push(None);
+                                    tool_input_event_emitted.push(false);
                                 }
                                 tool_use_blocks[index] = Some(content_block);
                                 tool_input_buffers[index] = Some(String::new());
-                                if let Some(tx) = stream_delta_tx {
-                                    let _ = tx.send(format!("\n[tool_use] {name}\n"));
-                                }
                             }
                         }
                         StreamEvent::ContentBlockDelta { index, delta } => {
                             if let Some(text) = delta.text {
                                 assistant_text.push_str(&text);
                                 if let Some(tx) = stream_delta_tx {
-                                    let _ = tx.send(text);
+                                    let _ = tx.send(ConversationStreamUpdate::Delta(text));
                                 }
                             }
 
@@ -103,6 +156,23 @@ impl ConversationManager {
                                 let maybe_buffer = tool_input_buffers.get_mut(index);
                                 if let Some(Some(buffer)) = maybe_buffer {
                                     buffer.push_str(&partial_json);
+                                }
+                                if stream_server_events {
+                                    let should_emit = tool_input_event_emitted
+                                        .get(index)
+                                        .map(|emitted| !*emitted)
+                                        .unwrap_or(false);
+                                    if should_emit {
+                                        if let Some(tx) = stream_delta_tx {
+                                            let _ = tx.send(ConversationStreamUpdate::Delta(
+                                                format!("\n* Event: input_json#{index}\n"),
+                                            ));
+                                        }
+                                        if let Some(flag) = tool_input_event_emitted.get_mut(index)
+                                        {
+                                            *flag = true;
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -122,7 +192,35 @@ impl ConversationManager {
                                 }
                             }
                         }
-                        _ => {}
+                        StreamEvent::MessageDelta { delta } => {
+                            if stream_server_events {
+                                if let Some(tx) = stream_delta_tx {
+                                    let stop_reason =
+                                        delta.stop_reason.unwrap_or_else(|| "none".to_string());
+                                    let _ = tx.send(ConversationStreamUpdate::Delta(format!(
+                                        "\n* Event: stop_reason={stop_reason}\n"
+                                    )));
+                                }
+                            }
+                        }
+                        StreamEvent::MessageStop => {
+                            if stream_server_events {
+                                if let Some(tx) = stream_delta_tx {
+                                    let _ = tx.send(ConversationStreamUpdate::Delta(
+                                        "\n* Event: message_stop\n".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        StreamEvent::Unknown => {
+                            if stream_server_events {
+                                if let Some(tx) = stream_delta_tx {
+                                    let _ = tx.send(ConversationStreamUpdate::Delta(
+                                        "\n* Event: unknown\n".to_string(),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -150,6 +248,8 @@ impl ConversationManager {
             } else {
                 assistant_text.clone()
             };
+            let assistant_history_text =
+                truncate_for_history(&assistant_history_text, limits.max_assistant_history_chars);
 
             let use_structured_round = use_structured_tool_protocol && !tagged_fallback_used;
 
@@ -157,7 +257,10 @@ impl ConversationManager {
                 let mut assistant_content_blocks = Vec::new();
                 if !assistant_text.is_empty() {
                     assistant_content_blocks.push(ContentBlock::Text {
-                        text: assistant_text.clone(),
+                        text: truncate_for_history(
+                            &assistant_text,
+                            limits.max_assistant_history_chars,
+                        ),
                     });
                 }
                 assistant_content_blocks.extend(tool_use_blocks.clone());
@@ -181,25 +284,46 @@ impl ConversationManager {
             let mut text_protocol_tool_results = Vec::new();
             for block in tool_use_blocks {
                 if let ContentBlock::ToolUse { id, name, input } = block {
-                    let result = self.execute_tool(&name, &input).await;
-                    if let Some(tx) = stream_delta_tx {
-                        match &result {
-                            Ok(_) => {
-                                let _ = tx.send(format!("\n+ [tool_result] {name}\n"));
-                            }
-                            Err(error) => {
-                                let _ = tx.send(format!("\n- [tool_error] {name}: {error}\n"));
+                    let approved = if require_tool_approval {
+                        self.request_tool_approval(&name, &input, stream_delta_tx)
+                            .await
+                    } else {
+                        true
+                    };
+
+                    let result = if approved {
+                        self.execute_tool(&name, &input).await
+                    } else {
+                        Err(anyhow::anyhow!("Tool execution cancelled by user"))
+                    };
+                    if stream_local_tool_events {
+                        if let Some(tx) = stream_delta_tx {
+                            match &result {
+                                Ok(_) => {
+                                    let _ = tx.send(ConversationStreamUpdate::Delta(format!(
+                                        "\n+ [tool_result] {name}\n"
+                                    )));
+                                }
+                                Err(error) => {
+                                    let _ = tx.send(ConversationStreamUpdate::Delta(format!(
+                                        "\n- [tool_error] {name}: {error}\n"
+                                    )));
+                                }
                             }
                         }
                     }
 
                     if use_structured_round {
-                        tool_result_blocks.push(ContentBlock::ToolResult {
-                            tool_use_id: id,
-                            content: result.as_ref().map_or_else(
+                        let history_content = truncate_for_history(
+                            &result.as_ref().map_or_else(
                                 |e| format!("Error executing tool: {e}"),
                                 ToString::to_string,
                             ),
+                            limits.max_tool_result_history_chars,
+                        );
+                        tool_result_blocks.push(ContentBlock::ToolResult {
+                            tool_use_id: id,
+                            content: history_content,
                             is_error: result.is_err(),
                         });
                     } else {
@@ -207,7 +331,10 @@ impl ConversationManager {
                             |e| format!("tool_error {name}:\n{e}"),
                             |output| format!("tool_result {name}:\n{output}"),
                         );
-                        text_protocol_tool_results.push(rendered);
+                        text_protocol_tool_results.push(truncate_for_history(
+                            &rendered,
+                            limits.max_tool_result_history_chars,
+                        ));
                     }
                 }
             }
@@ -224,6 +351,33 @@ impl ConversationManager {
                 });
             }
         }
+    }
+
+    async fn request_tool_approval(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        stream_delta_tx: Option<&mpsc::UnboundedSender<ConversationStreamUpdate>>,
+    ) -> bool {
+        let Some(tx) = stream_delta_tx else {
+            return true;
+        };
+
+        let (response_tx, response_rx) = oneshot::channel();
+        let request = ToolApprovalRequest {
+            tool_name: name.to_string(),
+            input_preview: tool_input_preview(name, input),
+            response_tx,
+        };
+
+        if tx
+            .send(ConversationStreamUpdate::ToolApprovalRequest(request))
+            .is_err()
+        {
+            return false;
+        }
+
+        response_rx.await.unwrap_or(false)
     }
 
     async fn execute_tool(&self, name: &str, input: &serde_json::Value) -> Result<String> {
@@ -270,12 +424,12 @@ impl ConversationManager {
                 .rename_file(get_str("old_path"), get_str("new_path")),
             "list_files" | "list_directory" => self.tool_executor.list_files(
                 input.get("path").and_then(|v| v.as_str()),
-                get_usize("max_entries", 200),
+                get_usize("max_entries", 100),
             ),
             "search_files" | "search" => self.tool_executor.search_files(
                 get_str("query"),
                 input.get("path").and_then(|v| v.as_str()),
-                get_usize("max_results", 50),
+                get_usize("max_results", 30),
             ),
             "git_status" => self.tool_executor.git_status(
                 get_bool("short", true),
@@ -292,6 +446,173 @@ impl ConversationManager {
             _ => Ok(format!("Unknown tool: {name}")),
         }
     }
+
+    fn prune_message_history(&mut self, max_api_messages: usize) {
+        if self.api_messages.len() <= max_api_messages {
+            return;
+        }
+        let to_drop = self.api_messages.len() - max_api_messages;
+        self.api_messages.drain(0..to_drop);
+    }
+}
+
+fn resolve_history_limits(is_local_endpoint: bool) -> HistoryLimits {
+    let defaults = if is_local_endpoint {
+        HistoryLimits {
+            max_assistant_history_chars: LOCAL_DEFAULT_MAX_ASSISTANT_HISTORY_CHARS,
+            max_tool_result_history_chars: LOCAL_DEFAULT_MAX_TOOL_RESULT_HISTORY_CHARS,
+            max_api_messages: LOCAL_DEFAULT_MAX_API_MESSAGES,
+        }
+    } else {
+        HistoryLimits {
+            max_assistant_history_chars: REMOTE_DEFAULT_MAX_ASSISTANT_HISTORY_CHARS,
+            max_tool_result_history_chars: REMOTE_DEFAULT_MAX_TOOL_RESULT_HISTORY_CHARS,
+            max_api_messages: REMOTE_DEFAULT_MAX_API_MESSAGES,
+        }
+    };
+
+    HistoryLimits {
+        max_assistant_history_chars: env_override_usize(
+            "AISTAR_MAX_ASSISTANT_HISTORY_CHARS",
+            defaults.max_assistant_history_chars,
+            200,
+            20_000,
+        ),
+        max_tool_result_history_chars: env_override_usize(
+            "AISTAR_MAX_TOOL_RESULT_HISTORY_CHARS",
+            defaults.max_tool_result_history_chars,
+            200,
+            40_000,
+        ),
+        max_api_messages: env_override_usize(
+            "AISTAR_MAX_API_MESSAGES",
+            defaults.max_api_messages,
+            4,
+            128,
+        ),
+    }
+}
+
+fn env_override_usize(key: &str, default: usize, min: usize, max: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|v| v.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn stream_local_tool_events_enabled() -> bool {
+    std::env::var("AISTAR_STREAM_LOCAL_TOOL_EVENTS")
+        .ok()
+        .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+fn tool_approval_enabled() -> bool {
+    std::env::var("AISTAR_TOOL_CONFIRM")
+        .ok()
+        .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+fn stream_server_events_enabled() -> bool {
+    std::env::var("AISTAR_STREAM_SERVER_EVENTS")
+        .ok()
+        .and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Some(true),
+            "0" | "false" | "no" | "off" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+fn tool_input_preview(tool_name: &str, input: &serde_json::Value) -> String {
+    match tool_name {
+        "edit_file" => preview_edit_file_input(input),
+        "write_file" => preview_write_file_input(input),
+        _ => {
+            let rendered =
+                serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+            truncate_for_history(&rendered, 1200)
+        }
+    }
+}
+
+fn preview_edit_file_input(input: &serde_json::Value) -> String {
+    let path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
+    let old_str = input.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
+    let new_str = input.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut out = String::new();
+    out.push_str(&format!("path: {path}\n"));
+    out.push_str(&format!(
+        "old_str: {} chars, {} lines\n",
+        old_str.chars().count(),
+        old_str
+            .lines()
+            .count()
+            .max(usize::from(!old_str.is_empty()))
+    ));
+    out.push_str(&preview_lines('-', old_str, 8, 1));
+    out.push_str(&format!(
+        "new_str: {} chars, {} lines\n",
+        new_str.chars().count(),
+        new_str
+            .lines()
+            .count()
+            .max(usize::from(!new_str.is_empty()))
+    ));
+    out.push_str(&preview_lines('+', new_str, 8, 1));
+    truncate_for_history(&out, 1400)
+}
+
+fn preview_write_file_input(input: &serde_json::Value) -> String {
+    let path = input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>");
+    let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut out = String::new();
+    out.push_str(&format!("path: {path}\n"));
+    out.push_str(&format!(
+        "content: {} chars, {} lines\n",
+        content.chars().count(),
+        content
+            .lines()
+            .count()
+            .max(usize::from(!content.is_empty()))
+    ));
+    out.push_str(&preview_lines('+', content, 10, 1));
+    truncate_for_history(&out, 1400)
+}
+
+fn preview_lines(prefix: char, text: &str, max_lines: usize, start_line: usize) -> String {
+    if text.is_empty() {
+        return format!("  {start_line} {prefix} <empty>\n");
+    }
+
+    let mut out = String::new();
+    let lines: Vec<&str> = text.lines().collect();
+    for (idx, line) in lines.iter().take(max_lines).enumerate() {
+        let line_number = start_line + idx;
+        out.push_str(&format!("  {line_number} {prefix} {line}\n"));
+    }
+    if lines.len() > max_lines {
+        out.push_str(&format!("  ... ({} more lines)\n", lines.len() - max_lines));
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -438,6 +759,23 @@ fn normalize_tagged_parameter_value(raw: &str) -> String {
         value.pop();
     }
     value
+}
+
+fn truncate_for_history(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+
+    let indicator = format!("\n...[truncated {} chars]", chars.len() - max_chars);
+    let keep = max_chars.saturating_sub(indicator.chars().count());
+    let mut out: String = chars.into_iter().take(keep).collect();
+    out.push_str(&indicator);
+    out
 }
 
 #[cfg(test)]
@@ -597,6 +935,16 @@ cal.js
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "read_file");
         assert_eq!(calls[0].input["path"], "cal.js");
+    }
+
+    #[test]
+    fn test_truncate_for_history() {
+        let text = "abcdefghij";
+        let truncated = truncate_for_history(text, 40);
+        assert_eq!(truncated, text);
+
+        let truncated = truncate_for_history(text, 5);
+        assert!(truncated.contains("[truncated"));
     }
 
     #[tokio::test]
