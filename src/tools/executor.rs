@@ -84,6 +84,94 @@ impl ToolExecutor {
         fs::write(resolved, new_content).context("Failed to edit file")
     }
 
+    pub fn rename_file(&self, old_path: &str, new_path: &str) -> Result<String> {
+        let from = self.resolve_path(old_path)?;
+        let to = self.resolve_path(new_path)?;
+
+        if !from.exists() {
+            bail!(
+                "Failed to rename file: source '{}' does not exist",
+                old_path
+            );
+        }
+        if from == to {
+            return Ok(format!("Source and target are the same: {old_path}"));
+        }
+
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent).context("Failed to create destination directory")?;
+        }
+        fs::rename(&from, &to).context("Failed to rename file")?;
+        Ok(format!("Renamed {} -> {}", old_path, new_path))
+    }
+
+    pub fn list_files(&self, path: Option<&str>, max_entries: usize) -> Result<String> {
+        let root = self.resolve_optional_path(path)?;
+        let limit = max_entries.clamp(1, 2000);
+        let mut entries = Vec::new();
+
+        if root.is_file() {
+            entries.push(self.to_workspace_relative_display(&root));
+        } else {
+            let mut children: Vec<_> = fs::read_dir(&root)
+                .with_context(|| format!("Failed to read directory {}", root.display()))?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .with_context(|| format!("Failed to list entries in {}", root.display()))?;
+            children.sort_by_key(|entry| entry.path());
+
+            for child in children {
+                let name = child.file_name();
+                let name = name.to_string_lossy();
+                if should_skip_list_entry(root.as_path(), self.working_dir.as_path(), &name) {
+                    continue;
+                }
+
+                let path = child.path();
+                let is_dir = child
+                    .file_type()
+                    .with_context(|| format!("Failed to inspect {}", path.display()))?
+                    .is_dir();
+                let mut display = self.to_workspace_relative_display(&path);
+                if is_dir {
+                    display.push('/');
+                }
+                entries.push(display);
+                if entries.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        if entries.is_empty() {
+            Ok("(no files found)".to_string())
+        } else {
+            Ok(entries.join("\n"))
+        }
+    }
+
+    pub fn search_files(
+        &self,
+        query: &str,
+        path: Option<&str>,
+        max_results: usize,
+    ) -> Result<String> {
+        let query =
+            non_empty_trimmed(query).context("search_files requires a non-empty 'query' field")?;
+        let root = self.resolve_optional_path(path)?;
+        let max_results = max_results.clamp(1, 200);
+
+        match self.search_with_rg(query, &root, max_results) {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                if error.to_string().contains("Failed to execute rg command") {
+                    self.search_fallback(query, &root, max_results)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
     pub fn git_status(&self, short: bool, path: Option<&str>) -> Result<String> {
         let mut args = vec!["status".to_string()];
         if short {
@@ -178,6 +266,107 @@ impl ToolExecutor {
             Ok(stdout)
         }
     }
+
+    fn resolve_optional_path(&self, path: Option<&str>) -> Result<PathBuf> {
+        match path.and_then(non_empty_trimmed) {
+            None => Ok(self.working_dir.clone()),
+            Some(".") => Ok(self.working_dir.clone()),
+            Some(value) => self.resolve_path(value),
+        }
+    }
+
+    fn to_workspace_relative_display(&self, path: &Path) -> String {
+        path.strip_prefix(&self.working_dir)
+            .map(|relative| relative.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string_lossy().to_string())
+    }
+
+    fn search_with_rg(&self, query: &str, root: &Path, max_results: usize) -> Result<String> {
+        let mut search_path = self.to_workspace_relative_display(root);
+        if search_path.is_empty() {
+            search_path = ".".to_string();
+        }
+        let output = Command::new("rg")
+            .current_dir(&self.working_dir)
+            .arg("--line-number")
+            .arg("--color")
+            .arg("never")
+            .arg("--smart-case")
+            .arg("--max-count")
+            .arg(max_results.to_string())
+            .arg("--")
+            .arg(query)
+            .arg(search_path)
+            .output()
+            .context("Failed to execute rg command")?;
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if stdout.is_empty() {
+                Ok("No matches found.".to_string())
+            } else {
+                Ok(stdout)
+            }
+        } else if output.status.code() == Some(1) {
+            Ok("No matches found.".to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!("search_files failed: {}", stderr);
+        }
+    }
+
+    fn search_fallback(&self, query: &str, root: &Path, max_results: usize) -> Result<String> {
+        let mut results = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        let case_sensitive = query.chars().any(char::is_uppercase);
+        let lowered_query = query.to_lowercase();
+
+        while let Some(path) = stack.pop() {
+            if path.is_dir() {
+                let mut children: Vec<_> = fs::read_dir(&path)
+                    .with_context(|| format!("Failed to read directory {}", path.display()))?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .with_context(|| format!("Failed to list entries in {}", path.display()))?;
+                children.sort_by_key(|entry| entry.path());
+                for child in children {
+                    stack.push(child.path());
+                }
+                continue;
+            }
+
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+
+            for (idx, line) in content.lines().enumerate() {
+                let is_match = if case_sensitive {
+                    line.contains(query)
+                } else {
+                    line.to_lowercase().contains(&lowered_query)
+                };
+                if is_match {
+                    results.push(format!(
+                        "{}:{}:{}",
+                        self.to_workspace_relative_display(&path),
+                        idx + 1,
+                        line
+                    ));
+                    if results.len() >= max_results {
+                        break;
+                    }
+                }
+            }
+            if results.len() >= max_results {
+                break;
+            }
+        }
+
+        if results.is_empty() {
+            Ok("No matches found.".to_string())
+        } else {
+            Ok(results.join("\n"))
+        }
+    }
 }
 
 fn non_empty_trimmed(value: &str) -> Option<&str> {
@@ -187,6 +376,21 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
     } else {
         Some(trimmed)
     }
+}
+
+fn should_skip_list_entry(root: &Path, working_dir: &Path, name: &str) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+
+    if root != working_dir {
+        return false;
+    }
+
+    matches!(
+        name,
+        "target" | "node_modules" | "__pycache__" | ".venv" | "venv" | "build" | "dist"
+    )
 }
 
 #[cfg(test)]

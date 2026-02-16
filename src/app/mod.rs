@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::state::ConversationManager;
 use anyhow::Result;
-use crossterm::style::Stylize;
+use crossterm::style::{style, Color, Stylize};
 use std::io::{self, Write};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -13,16 +13,73 @@ pub enum UiUpdate {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineStyle {
+    Normal,
+    Add,
+    Delete,
+}
+
+struct StreamPrinter {
+    current_line: String,
+    streamed_any_delta: bool,
+}
+
+impl StreamPrinter {
+    fn new() -> Self {
+        Self {
+            current_line: String::new(),
+            streamed_any_delta: false,
+        }
+    }
+
+    fn begin_turn(&mut self) {
+        self.streamed_any_delta = false;
+    }
+
+    fn has_streamed_delta(&self) -> bool {
+        self.streamed_any_delta
+    }
+
+    fn write_chunk(&mut self, chunk: &str) -> Result<()> {
+        for ch in chunk.chars() {
+            if ch == '\r' {
+                continue;
+            }
+            if ch == '\n' {
+                print!("\n");
+                self.current_line.clear();
+                continue;
+            }
+
+            self.current_line.push(ch);
+            match line_style(&self.current_line) {
+                LineStyle::Add => print!("{}", style(ch.to_string()).with(Color::Green)),
+                LineStyle::Delete => print!("{}", style(ch.to_string()).with(Color::Red)),
+                LineStyle::Normal => print!("{ch}"),
+            }
+            self.streamed_any_delta = true;
+        }
+        io::stdout().flush()?;
+        Ok(())
+    }
+
+    fn end_turn(&mut self) -> Result<()> {
+        if !self.current_line.is_empty() {
+            println!();
+        }
+        println!();
+        self.current_line.clear();
+        io::stdout().flush()?;
+        Ok(())
+    }
+}
+
 pub struct App {
     update_rx: mpsc::UnboundedReceiver<UiUpdate>,
     message_tx: mpsc::UnboundedSender<String>,
     should_quit: bool,
-}
-
-#[derive(Debug, Clone)]
-struct CodeSnippet {
-    language: String,
-    body: String,
+    stream_printer: StreamPrinter,
 }
 
 impl App {
@@ -66,25 +123,22 @@ impl App {
             update_rx,
             message_tx,
             should_quit: false,
+            stream_printer: StreamPrinter::new(),
         })
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        println!(
-            "{}",
-            "aistar text mode • type /quit to exit • streaming enabled".dark_grey()
-        );
+        println!("aistar text mode • type /quit to exit • streaming enabled");
+        println!();
 
-        loop {
-            self.print_prompt()?;
+        while !self.should_quit {
+            print!("{}", style("> ").dark_grey());
+            io::stdout().flush()?;
 
-            let mut input = String::new();
-            let read = io::stdin().read_line(&mut input)?;
-            if read == 0 {
+            let Some(raw_input) = read_user_line().await? else {
                 break;
-            }
-
-            let content = input.trim().to_string();
+            };
+            let content = raw_input.trim().to_string();
             if content.is_empty() {
                 continue;
             }
@@ -93,113 +147,64 @@ impl App {
                 "q" | "quit" | "exit" | "/q" | "/quit" | "/exit"
             ) {
                 self.should_quit = true;
-            } else {
-                self.render_turn(content).await?;
-            }
-
-            if self.should_quit {
                 break;
             }
+
+            self.stream_printer.begin_turn();
+            let _ = self.message_tx.send(content);
+
+            loop {
+                match self.update_rx.recv().await {
+                    Some(UiUpdate::StreamDelta(text)) => {
+                        self.stream_printer.write_chunk(&text)?;
+                    }
+                    Some(UiUpdate::TurnComplete(text)) => {
+                        if !self.stream_printer.has_streamed_delta() && !text.is_empty() {
+                            self.stream_printer.write_chunk(&text)?;
+                        }
+                        self.stream_printer.end_turn()?;
+                        break;
+                    }
+                    Some(UiUpdate::Error(err)) => {
+                        self.stream_printer.end_turn()?;
+                        println!("{}", style(format!("error: {err}")).with(Color::Red));
+                        println!();
+                        break;
+                    }
+                    None => {
+                        self.should_quit = true;
+                        break;
+                    }
+                }
+            }
         }
 
         Ok(())
-    }
-
-    fn print_prompt(&self) -> Result<()> {
-        print!("{} ", ">".dark_grey());
-        io::stdout().flush()?;
-        Ok(())
-    }
-
-    async fn render_turn(&mut self, content: String) -> Result<()> {
-        let _ = self.message_tx.send(content);
-
-        let mut final_text: Option<String> = None;
-        while final_text.is_none() {
-            match self.update_rx.recv().await {
-                Some(UiUpdate::StreamDelta(text)) => {
-                    print!("{text}");
-                    io::stdout().flush()?;
-                }
-                Some(UiUpdate::TurnComplete(text)) => {
-                    final_text = Some(text);
-                }
-                Some(UiUpdate::Error(err)) => {
-                    println!();
-                    println!("{}", format!("error: {err}").red());
-                    final_text = Some(String::new());
-                }
-                None => break,
-            }
-        }
-
-        println!();
-        if let Some(text) = final_text {
-            self.print_numbered_code_snippets(&text);
-        }
-        println!();
-        Ok(())
-    }
-
-    fn print_numbered_code_snippets(&self, text: &str) {
-        let snippets = extract_code_snippets(text);
-        if snippets.is_empty() {
-            return;
-        }
-
-        println!("{}", "code snippets".dark_grey());
-        for (idx, snippet) in snippets.iter().enumerate() {
-            if snippet.language.is_empty() {
-                println!("{}", format!("[{}]", idx + 1).dark_grey());
-            } else {
-                println!(
-                    "{}",
-                    format!("[{}] {}", idx + 1, snippet.language).dark_grey()
-                );
-            }
-
-            if snippet.body.is_empty() {
-                println!("   1 |");
-                continue;
-            }
-
-            for (line_no, line) in snippet.body.lines().enumerate() {
-                println!("{:>4} | {}", line_no + 1, line);
-            }
-            println!();
-        }
     }
 }
 
-fn extract_code_snippets(text: &str) -> Vec<CodeSnippet> {
-    let mut snippets = Vec::new();
-    let mut in_block = false;
-    let mut current_lang = String::new();
-    let mut current_lines = Vec::new();
-
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("```") {
-            if in_block {
-                snippets.push(CodeSnippet {
-                    language: current_lang.clone(),
-                    body: current_lines.join("\n"),
-                });
-                in_block = false;
-                current_lang.clear();
-                current_lines.clear();
-            } else {
-                in_block = true;
-                current_lang = rest.trim().to_string();
-            }
-            continue;
+async fn read_user_line() -> Result<Option<String>> {
+    task::spawn_blocking(|| -> Result<Option<String>> {
+        let mut input = String::new();
+        let bytes = io::stdin().read_line(&mut input)?;
+        if bytes == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(input))
         }
+    })
+    .await?
+}
 
-        if in_block {
-            current_lines.push(line.to_string());
-        }
+fn line_style(line: &str) -> LineStyle {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+        LineStyle::Add
+    } else if trimmed.starts_with('-') && !trimmed.starts_with("---") {
+        LineStyle::Delete
+    } else {
+        LineStyle::Normal
     }
-
-    snippets
 }
 
 #[cfg(test)]
@@ -219,13 +224,11 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_code_snippets_numbering_ready() {
-        let text = "first\n```rust\nlet x = 1;\n```\nthen\n```txt\nhello\nworld\n```";
-        let snippets = extract_code_snippets(text);
-        assert_eq!(snippets.len(), 2);
-        assert_eq!(snippets[0].language, "rust");
-        assert_eq!(snippets[0].body, "let x = 1;");
-        assert_eq!(snippets[1].language, "txt");
-        assert_eq!(snippets[1].body, "hello\nworld");
+    fn test_line_style_feedback() {
+        assert_eq!(line_style("+added"), LineStyle::Add);
+        assert_eq!(line_style("   +added"), LineStyle::Add);
+        assert_eq!(line_style("-removed"), LineStyle::Delete);
+        assert_eq!(line_style("   -removed"), LineStyle::Delete);
+        assert_eq!(line_style("normal"), LineStyle::Normal);
     }
 }

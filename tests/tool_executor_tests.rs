@@ -62,6 +62,52 @@ fn test_edit_file_ambiguous() {
 }
 
 #[test]
+fn test_rename_file() {
+    let temp = TempDir::new().expect("temp dir");
+    let executor = ToolExecutor::new(temp.path().to_path_buf());
+
+    executor
+        .write_file("calculator.rs", "fn main() {}\n")
+        .expect("seed source file");
+    let result = executor
+        .rename_file("calculator.rs", "cal.rs")
+        .expect("rename file");
+
+    assert!(result.contains("Renamed"));
+    assert!(!temp.path().join("calculator.rs").exists());
+    assert!(temp.path().join("cal.rs").exists());
+}
+
+#[test]
+fn test_list_and_search_files() {
+    let temp = TempDir::new().expect("temp dir");
+    let executor = ToolExecutor::new(temp.path().to_path_buf());
+
+    executor
+        .write_file("src/cal.rs", "fn radical(n: f64) -> f64 { n.sqrt() }\n")
+        .expect("write test file");
+    executor
+        .write_file("README.md", "calculator notes\n")
+        .expect("write readme");
+
+    let listed = executor
+        .list_files(Some("."), 100)
+        .expect("list files should succeed");
+    assert!(listed.contains("src/"));
+    assert!(listed.contains("README.md"));
+
+    let listed_src = executor
+        .list_files(Some("src"), 100)
+        .expect("list src files should succeed");
+    assert!(listed_src.contains("src/cal.rs"));
+
+    let searched = executor
+        .search_files("radical", Some("."), 20)
+        .expect("search files should succeed");
+    assert!(searched.contains("src/cal.rs:1"));
+}
+
+#[test]
 fn test_git_tools_status_diff_add_commit_log_show() {
     let temp = TempDir::new().expect("temp dir");
     init_git_repo(temp.path());
