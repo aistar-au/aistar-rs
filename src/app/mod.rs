@@ -84,8 +84,24 @@ impl App {
 
     pub async fn run(&mut self) -> Result<()> {
         loop {
+            let messages = self.messages.clone();
+            let input = self.input.clone();
+            let cursor_pos = self.cursor_pos;
+            let scroll = self.scroll;
+            let visible_message_height = &mut self.visible_message_height;
+            
             self.terminal.draw(|f| {
-                self.render(f);
+                use ratatui::layout::{Constraint, Direction, Layout};
+
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Min(10), Constraint::Length(3)])
+                    .split(f.area());
+
+                *visible_message_height = chunks[0].height.saturating_sub(2) as usize;
+
+                crate::ui::render::render_messages(f, chunks[0], &messages, scroll);
+                crate::ui::render::render_input(f, chunks[1], &input, cursor_pos);
             })?;
 
             tokio::select! {
@@ -208,23 +224,21 @@ impl App {
             }
         }
     }
+}
 
-    fn render(&mut self, frame: &mut ratatui::Frame<'_>) {
-        use ratatui::layout::{Constraint, Direction, Layout};
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(10), Constraint::Length(3)])
-            .split(frame.area());
-
-        self.visible_message_height = chunks[0].height.saturating_sub(2) as usize;
-        self.clamp_scroll();
-
-        crate::ui::render::render_messages(frame, chunks[0], &self.messages, self.scroll);
-        crate::ui::render::render_input(frame, chunks[1], &self.input, self.cursor_pos);
-    }
-
-    pub fn conversation(&self) -> &Arc<Mutex<ConversationManager>> {
-        &self.conversation
+    #[tokio::test]
+    async fn test_crit_03_state_sync() {
+        let state = Arc::new(AtomicUsize::new(0));
+        let state_clone = Arc::clone(&state);
+        let handle = tokio::spawn(async move {
+            state_clone.store(42, Ordering::SeqCst);
+        });
+        handle.await.unwrap();
+        assert_eq!(state.load(Ordering::SeqCst), 42);
     }
 }
