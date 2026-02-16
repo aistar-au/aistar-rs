@@ -1,176 +1,80 @@
-# Test-Driven Manifest (TDM) Strategy
+# Agentic Repair: The Test-Driven Manifest (TDM)
 
-## Overview
+This document outlines the architectural routine for maintaining and evolving the `aistar` codebase using the **Test-Driven Manifest (TDM)** strategy. This approach is designed to maximize the efficacy of AI coding agents while strictly preventing regressions.
 
-The Test-Driven Manifest strategy is designed for **small context window agents** (8k tokens or less). It provides a binary definition of success: the task is done when `cargo test` returns green.
+## The Core Philosophy
 
-## The Problem
+Large Language Models (LLMs) perform best when given **narrow focus** and **binary success criteria**. By moving tasks out of a monolithic README and into atomic, test-backed manifest files, we overcome the "context window" limitations of modern AI tools.
 
-When working with AI agents that have limited context windows:
+---
 
-1. **Hallucination:** Agents may "guess" that a fix works without verification
-2. **Token Waste:** Loading entire codebases consumes precious context
-3. **Merge Conflicts:** Multiple agents working on the same files cause conflicts
-4. **Ambiguity:** "It should work" is not a clear success criteria
+## The 3-Pillar Workflow
 
-## The Solution: Anchor Tests
+### 1. The Task Manifest (`TASKS/`)
+Every significant bug fix or feature starts as a file in the `TASKS/` directory. 
+- **File Naming:** `ID-short-description.md` (e.g., `CRIT-01-protocol.md`).
+- **Content:** Must define the **Target File** and the **Definition of Done**.
+- **Context Management:** Task files should never exceed 2k tokens.
 
-An **Anchor Test** is a failing regression test that defines success:
+### 2. The Anchor (Failing Test)
+Before an agent is allowed to touch production logic, an "Anchor" must be established.
+- **The Red Phase:** The Architect (Human) writes a minimal test at the bottom of the target module that reproduces the bug or asserts the missing feature.
+- **The Compilation Check:** If the bug is structural, the Anchor may even be a failing `cargo check` (Type-level anchor).
 
-```rust
-#[test]
-fn test_crit_02_regression() {
-    // This test FAILS before the fix, PASSES after the fix
-    let msg = ApiMessage { 
-        role: "user".into(), 
-        content: Content::Text("Hello".into()) 
-    };
-    let serialized = serde_json::to_value(&msg).unwrap();
-    assert!(serialized.get("content").is_some(), "Missing 'content' key!");
-}
-```
+### 3. The Dispatch (The Prompt)
+Agents are invoked with a specific "tri-point" context:
+1. The **TDM Philosophy** (`CONTRIBUTING.md`).
+2. The **Active Task** (`TASKS/Task-ID.md`).
+3. The **Anchor Location** (`src/path/to/file.rs`).
 
-### Properties of a Good Anchor
 
-1. **Minimal:** Only tests the specific bug, nothing else
-2. **Named with Task ID:** `test_crit_02_regression` links back to `CRIT-02`
-3. **Self-Documenting:** The assertion message explains what's wrong
-4. **Fast:** Unit test, not integration test
 
-## Workflow Steps
+---
 
-### Step 1: Create the Task File
+## Routine for the Architect
 
-Each task gets its own file in `TASKS/`:
+As the Lead Architect, your role is to manage the "State Machine" of the repository:
 
-```markdown
-# Task CRIT-XX: Brief Description
-**Target File:** `src/path/to/file.rs`
-**Issue:** One-sentence description of the bug.
-**Definition of Done:**
-1. Specific action 1.
-2. Anchor test passes.
-**Anchor Test:** `test_crit_XX_regression` in `src/path/to/file.rs`
-```
+| Phase | Responsibility | Goal |
+| :--- | :--- | :--- |
+| **Drafting** | Write the `.md` task and the failing Rust test. | Establish "Red" state. |
+| **Dispatch** | Feed the task to the agent (Aider/Gemini). | Trigger "Green" attempt. |
+| **Verification** | Run `cargo test --all` and review the diff. | Ensure no regressions. |
+| **Promotion** | Move task to `TASKS/COMPLETED/` and merge. | Update repository history. |
 
-### Step 2: Create the Anchor
+---
 
-Add a failing test to the target file:
+## Regression Proofing
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
+Because every fix is tied to a test, we build a **Safety Net** of regression tests. Over time, these tests move from the "Anchor" section into a formal `tests/` directory or a persistent `mod tests` block, ensuring that Agent B never breaks the work of Agent A.
 
-    #[test]
-    fn test_crit_XX_regression() {
-        // ANCHOR: This will FAIL until the bug is fixed
-        assert!(false, "Not yet implemented");
-    }
-}
-```
+## Prompting Pattern
 
-### Step 3: Run the Test
+When delegating to an agent, always use the following template to maintain the TDM loop:
 
-```bash
-cargo test test_crit_XX_regression -- --nocapture
-# Expected: FAILED
-```
+> "Refer to `CONTRIBUTING.md`. I am assigning you **Task [ID]**. 
+> 1. Read `TASKS/[ID].md`. 
+> 2. Identify the failing test `[test_name]` in `[file_path]`. 
+> 3. Modify the code to make the test pass. 
+> 4. Verify with `cargo test`."
 
-### Step 4: Prompt the Agent
+---
 
-```
-I need you to fix TASKS/CRIT-XX-description.md.
-1. Read src/path/to/file.rs.
-2. Look at the failing test test_crit_XX_regression.
-3. Modify the code to make the test pass.
-4. Run cargo test and iterate until the test passes.
-5. Do not touch any other files.
-```
+## Task Naming Convention
 
-### Step 5: Verify and Merge
+| Prefix | Type | Example |
+|--------|------|---------|
+| `CRIT-XX` | Critical bugs | `CRIT-01-protocol.md` |
+| `FEAT-XX` | Feature requests | `FEAT-01-streaming-ui.md` |
+| `REF-XX` | Refactoring tasks | `REF-01-error-handling.md` |
+| `DOC-XX` | Documentation tasks | `DOC-01-api-docs.md` |
 
-```bash
-cargo test test_crit_XX_regression
-# Expected: PASSED
-```
+---
 
-## Token Efficiency
+## Current Tasks
 
-| Approach | Tokens Used |
-|----------|-------------|
-| Load entire codebase | ~50,000+ |
-| Load task file + target file | ~300-500 |
-| **Savings** | **99%** |
-
-## Modular Safety
-
-When tasks target different files, agents cannot conflict:
-
-```
-Agent A: TASKS/CRIT-02 -> src/types/api.rs
-Agent B: TASKS/CRIT-03 -> src/app/mod.rs
-```
-
-Each agent only reads and writes its assigned file.
-
-## Example: CRIT-02 Serde Fix
-
-### Task File (`TASKS/CRIT-02-serde-fix.md`)
-
-```markdown
-# Task CRIT-02: Serde Serialization Repair
-**Target File:** `src/types/api.rs`
-**Issue:** The `ApiMessage` struct uses `#[serde(flatten)]` on the `content` field.
-This causes serialization to fail with "can only flatten structs and maps".
-**Definition of Done:**
-1. Remove `#[serde(flatten)]` from line 6.
-2. Test `test_crit_02_regression` passes.
-```
-
-### Anchor Test
-
-```rust
-#[test]
-fn test_crit_02_regression() {
-    let msg = ApiMessage { 
-        role: "user".into(), 
-        content: Content::Text("Hello".into()) 
-    };
-    let serialized = serde_json::to_value(&msg).unwrap();
-    assert!(serialized.get("content").is_some());
-}
-```
-
-### Before Fix
-
-```
-test types::api::tests::test_crit_02_regression ... FAILED
-Error: "can only flatten structs and maps (got a string)"
-```
-
-### After Fix
-
-```
-test types::api::tests::test_crit_02_regression ... ok
-```
-
-## Best Practices
-
-1. **One Task Per File:** Don't combine multiple issues
-2. **Minimal Context:** Only include what's necessary
-3. **Clear Target:** Specify exact file and line numbers
-4. **Test First:** Always create the anchor before the fix
-5. **No Side Effects:** Tasks should not modify files outside their target
-
-## Integration with mdbook
-
-Add this document to your `SUMMARY.md`:
-
-```markdown
-# Contributor Guide
-- [Development Setup](./dev/setup.md)
-- [Agentic Repair Strategy](./dev/manifest-strategy.md)
-```
-
-This keeps user documentation clean while providing developers (and agents) with the workflow details.
+| ID | Target File | Status | Description |
+|----|-------------|--------|-------------|
+| CRIT-01 | `src/state/conversation.rs` | Pending | Anthropic protocol mock test |
+| CRIT-02 | `src/types/api.rs` | Fixed | Serde flatten removed |
+| CRIT-03 | `src/app/mod.rs` | Verified | State sync test passes |

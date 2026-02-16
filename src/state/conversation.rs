@@ -157,3 +157,28 @@ impl ConversationManager {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::ApiClient;
+    use crate::config::Config;
+    use crate::tools::ToolExecutor;
+
+    #[test]
+    fn test_crit_01_protocol_flow() {
+        // ANCHOR: This test verifies the multi-turn conversation protocol.
+        // It will FAIL until a mock API client is implemented.
+        // 
+        // The test should:
+        // 1. Create a ConversationManager with a mock client
+        // 2. Send a message that triggers tool use
+        // 3. Verify the tool is executed
+        // 4. Verify the final response incorporates tool results
+        //
+        // Current status: INCOMPLETE - needs mock ApiClient implementation
+        
+        // Placeholder assertion - this test needs the mock infrastructure
+        assert!(false, "CRIT-01: Mock API client not yet implemented. See TASKS/CRIT-01-protocol.md");
+    }
+}
