@@ -61,7 +61,10 @@ pub enum StreamEvent {
 pub struct Delta {
     #[serde(rename = "type")]
     pub delta_type: String,
+    #[serde(default)]
     pub text: Option<String>,
+    #[serde(default)]
+    pub partial_json: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

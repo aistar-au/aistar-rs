@@ -12,11 +12,18 @@ impl ToolExecutor {
     }
 
     fn resolve_path(&self, path: &str) -> Result<PathBuf> {
-        if path.contains("..") || path.starts_with('/') || path.contains('\\') {
-            bail!("Security error: path traversal detected: {}", path);
+        if path.starts_with('/') || path.contains('\\') {
+            bail!("Security error: absolute or platform-specific path not allowed: {path}");
         }
 
-        let requested = self.working_dir.join(path);
+        let relative_path = Path::new(path);
+        for component in relative_path.components() {
+            if matches!(component, Component::ParentDir) {
+                bail!("Security error: path traversal detected: {path}");
+            }
+        }
+
+        let requested = self.working_dir.join(relative_path);
         let normalized = self.normalize_path(&requested);
         if !normalized.starts_with(&self.working_dir) {
             bail!("Security error: path escapes working directory");
@@ -84,11 +91,20 @@ mod tests {
 
     #[test]
     fn test_path_traversal_blocked() {
-        let temp = TempDir::new().unwrap();
+        let temp = TempDir::new().expect("temp dir");
         let executor = ToolExecutor::new(temp.path().to_path_buf());
 
         assert!(executor.resolve_path("../../etc/passwd").is_err());
         assert!(executor.resolve_path("/etc/passwd").is_err());
         assert!(executor.resolve_path("..\\windows\\system32").is_err());
+    }
+
+    #[test]
+    fn test_filename_with_double_dots_allowed() {
+        let temp = TempDir::new().expect("temp dir");
+        let executor = ToolExecutor::new(temp.path().to_path_buf());
+
+        assert!(executor.resolve_path("my..file.txt").is_ok());
+        assert!(executor.resolve_path("v..2.0.md").is_ok());
     }
 }

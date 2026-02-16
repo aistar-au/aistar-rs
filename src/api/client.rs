@@ -29,6 +29,7 @@ impl ApiClient {
             "model": self.model,
             "max_tokens": 4096,
             "stream": true,
+            "system": "You are a helpful coding assistant that uses tools safely.",
             "messages": messages,
             "tools": [
                 {

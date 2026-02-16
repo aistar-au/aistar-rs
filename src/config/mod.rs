@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -22,15 +22,14 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         if self.model.starts_with("local/") {
-            eprintln!("⚠️  WARNING: Local models not supported in v0.1.0");
+            bail!("Local models not supported in v0.1.0");
         }
 
         if !self.model.starts_with("claude-") {
-            eprintln!("⚠️  WARNING: Invalid model name: {}", self.model);
-            eprintln!("    Valid examples:");
-            eprintln!("    - claude-3-sonnet-20240229");
-            eprintln!("    - claude-sonnet-4-5-20250929");
-            eprintln!("    - claude-3-opus-20240229");
+            bail!(
+                "Invalid model name: '{}'. Expected a model starting with 'claude-'",
+                self.model
+            );
         }
 
         Ok(())
