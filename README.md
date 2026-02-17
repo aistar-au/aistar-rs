@@ -1,2 +1,2 @@
 # aistar-rs
-<img width="2560" height="1528" alt="image" src="https://github.com/user-attachments/assets/406d03a5-f783-4bb7-9bc7-2091496a8d8c" />
+<img width="973" height="721" alt="image" src="https://github.com/user-attachments/assets/260cda51-aa28-45ec-9955-0c351742043b" />
