@@ -32,6 +32,7 @@ This task adds stubs only. No logic, no wiring, no changes to `src/app/mod.rs`.
 | Operation | File |
 | :--- | :--- |
 | **Rename** (move, do not delete content) | `src/runtime.rs` → `src/runtime/mod.rs` |
+| **Create** | `src/runtime/update.rs` |
 | **Create** | `src/runtime/mode.rs` |
 | **Create** | `src/runtime/context.rs` |
 | **Create** | `src/runtime/event.rs` |
@@ -61,8 +62,11 @@ before the existing helper functions:
 pub mod context;
 pub mod event;
 pub mod frontend;
-pub mod mode;
 pub mod r#loop;  // `loop` is a reserved keyword; raw identifier required
+pub mod mode;
+pub mod update;
+
+pub use update::UiUpdate;
 
 // existing helpers follow unchanged
 pub fn parse_bool_flag(...) { ... }
@@ -72,10 +76,36 @@ pub fn parse_bool_flag(...) { ... }
 
 ## Step 2 — Create stub files
 
+### `src/runtime/update.rs`
+
+`UiUpdate` lives here — not in `src/app/mod.rs` and not in `src/types/` —
+so that `RuntimeMode`, `RuntimeContext`, and `Runtime<M>` can all reference
+it without creating a circular dependency. `src/app/mod.rs` imports it as
+`use crate::runtime::UiUpdate`.
+
+```rust
+use crate::state::{StreamBlock, ToolApprovalRequest};
+
+/// Events flowing from the model/tool layer up to the UI layer.
+///
+/// Defined in `runtime` (not `app`) so runtime types can reference it
+/// without depending on the UI layer. `src/app/mod.rs` imports this as
+/// `use crate::runtime::UiUpdate`.
+pub enum UiUpdate {
+    StreamDelta(String),
+    StreamBlockStart { index: usize, block: StreamBlock },
+    StreamBlockDelta { index: usize, delta: String },
+    StreamBlockComplete { index: usize },
+    ToolApprovalRequest(ToolApprovalRequest),
+    TurnComplete,
+    Error(String),
+}
+```
+
 ### `src/runtime/mode.rs`
 
 ```rust
-use crate::types::UiUpdate;
+use crate::runtime::UiUpdate;
 use super::context::RuntimeContext;
 
 pub trait RuntimeMode {
@@ -87,19 +117,28 @@ pub trait RuntimeMode {
 
 ### `src/runtime/context.rs`
 
+`RuntimeContext<'a>` is a borrowed stub in REF-02: it carries
+`&'a mut ConversationManager` only.
+
+This keeps REF-02 minimal and compile-focused. REF-04 migrates this borrowed
+stub to the owned `RuntimeContext` shape with cancellation/dispatch fields.
+
+`start_turn` and `cancel_turn` are stubs here; they are wired in REF-04.
+
 ```rust
-use crate::state::conversation::ConversationManager;
-use crate::types::UiUpdate;
-use tokio::sync::mpsc;
+use crate::state::ConversationManager;
 
 pub struct RuntimeContext<'a> {
     pub conversation: &'a mut ConversationManager,
 }
 
 impl<'a> RuntimeContext<'a> {
-    pub fn start_turn(&mut self, _input: String, _tx: mpsc::UnboundedSender<UiUpdate>) {
+    /// Begin a new conversation turn. Wired in REF-04; currently a no-op stub.
+    pub fn start_turn(&mut self, _input: String) {
         // wired in REF-04
     }
+
+    /// Cancel the active turn. Wired in REF-04; currently a no-op stub.
     pub fn cancel_turn(&mut self) {
         // wired in REF-04
     }
@@ -109,9 +148,12 @@ impl<'a> RuntimeContext<'a> {
 ### `src/runtime/event.rs`
 
 ```rust
-// Adjust import path if ToolApprovalRequest lives elsewhere in your crate.
-use crate::types::ToolApprovalRequest;
+use crate::state::ToolApprovalRequest;
 
+/// Internal routing events for the runtime loop.
+///
+/// Distinct from `UiUpdate` which flows to modes.
+/// Reserved for future multi-mode dispatch (REF-06+); stub for now.
 pub enum RuntimeEvent {
     TurnStarted { id: u64 },
     StreamDelta { text: String },
@@ -136,7 +178,7 @@ pub trait FrontendAdapter {
 ### `src/runtime/loop.rs`
 
 ```rust
-use crate::types::UiUpdate;
+use crate::runtime::UiUpdate;
 use tokio::sync::mpsc;
 use super::{context::RuntimeContext, frontend::FrontendAdapter, mode::RuntimeMode};
 
@@ -168,9 +210,11 @@ fn test_ref_02_runtime_types_compile() {
         event::RuntimeEvent,
         frontend::FrontendAdapter,
         mode::RuntimeMode,
+        UiUpdate,
     };
     // Zero-cost existence check — if the module tree compiles, this passes.
     let _ = std::mem::size_of::<RuntimeEvent>();
+    let _ = std::mem::size_of::<UiUpdate>();
 }
 ```
 
@@ -194,7 +238,7 @@ cargo test test_is_local_endpoint_url_normalizes_case_and_space -- --nocapture
 # 4. Full regression suite
 cargo test --all
 
-# 5. No ratatui/crossterm in src/runtime/ (use grep if musl target unavailable)
+# 5. No ratatui/crossterm in src/runtime/
 grep -r "ratatui\|crossterm" src/runtime/ && echo "FAIL: UI crates in runtime" || echo "clean"
 ```
 
@@ -204,6 +248,7 @@ Also confirm with git that the only changed files are inside `src/runtime/`:
 git diff --name-only
 # Expected output — nothing outside src/runtime/:
 # src/runtime/mod.rs
+# src/runtime/update.rs
 # src/runtime/mode.rs
 # src/runtime/context.rs
 # src/runtime/event.rs
@@ -216,7 +261,10 @@ git diff --name-only
 ## Definition of done
 
 - [ ] `src/runtime/` directory exists; `src/runtime.rs` is gone.
-- [ ] `src/runtime/mod.rs` contains the original helpers unchanged plus the five new `pub mod` declarations at the top.
+- [ ] `src/runtime/mod.rs` contains original helpers unchanged plus `pub mod` declarations and `pub use update::UiUpdate` at the top.
+- [ ] `src/runtime/update.rs` defines `UiUpdate`; imports from `crate::state`, **not** `crate::types`.
+- [ ] All `UiUpdate` references inside `src/runtime/` use `crate::runtime::UiUpdate` — not `crate::app::UiUpdate` or `crate::types::UiUpdate`.
+- [ ] `RuntimeContext<'a>` has `conversation: &'a mut ConversationManager` (borrowed stub shape).
 - [ ] `src/runtime/{mode,context,event,frontend,loop}.rs` created as stubs.
 - [ ] `cargo check --all-targets` passes — proves `use crate::runtime::parse_bool_flag` in `app/mod.rs` still resolves.
 - [ ] `test_ref_02_runtime_types_compile` passes.
