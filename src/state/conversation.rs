@@ -33,6 +33,18 @@ pub struct ToolApprovalRequest {
     pub response_tx: oneshot::Sender<bool>,
 }
 
+#[cfg(test)]
+impl ToolApprovalRequest {
+    pub fn test_stub() -> Self {
+        let (response_tx, _response_rx) = oneshot::channel::<bool>();
+        Self {
+            tool_name: "read_file".to_string(),
+            input_preview: "{}".to_string(),
+            response_tx,
+        }
+    }
+}
+
 const LOCAL_DEFAULT_MAX_ASSISTANT_HISTORY_CHARS: usize = 1_200;
 const LOCAL_DEFAULT_MAX_TOOL_RESULT_HISTORY_CHARS: usize = 2_500;
 const LOCAL_DEFAULT_MAX_API_MESSAGES: usize = 14;

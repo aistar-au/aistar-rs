@@ -1,5 +1,7 @@
 use crate::config::Config;
 use crate::edit_diff::{format_edit_hunks, DEFAULT_EDIT_DIFF_CONTEXT_LINES};
+use crate::runtime::context::RuntimeContext;
+use crate::runtime::mode::RuntimeMode;
 use crate::runtime::parse_bool_flag;
 use crate::state::{
     ConversationManager, ConversationStreamUpdate, StreamBlock, ToolApprovalRequest, ToolStatus,
@@ -46,8 +48,95 @@ pub enum UiUpdate {
     StreamBlockDelta { index: usize, delta: String },
     StreamBlockComplete { index: usize },
     ToolApprovalRequest(ToolApprovalRequest),
-    TurnComplete(String),
+    TurnComplete,
     Error(String),
+}
+
+struct HistoryState {
+    messages: Vec<String>,
+    scroll: usize,
+}
+
+struct InputState {
+    buffer: String,
+    cursor_byte: usize,
+}
+
+enum OverlayKind {
+    ToolPermission(ToolApprovalRequest),
+    Error(String),
+}
+
+struct OverlayState {
+    kind: OverlayKind,
+}
+
+pub struct TuiMode {
+    history: HistoryState,
+    input: InputState,
+    overlay: Option<OverlayState>,
+    turn_in_progress: bool,
+}
+
+impl TuiMode {
+    pub fn new() -> Self {
+        Self {
+            history: HistoryState {
+                messages: Vec::new(),
+                scroll: 0,
+            },
+            input: InputState {
+                buffer: String::new(),
+                cursor_byte: 0,
+            },
+            overlay: None,
+            turn_in_progress: false,
+        }
+    }
+}
+
+impl RuntimeMode for TuiMode {
+    fn on_user_input(&mut self, input: String, ctx: &mut RuntimeContext) {
+        if self.overlay.is_some() {
+            return;
+        }
+        if self.turn_in_progress {
+            return;
+        }
+
+        self.turn_in_progress = true;
+        let _ = input;
+        let _ = ctx;
+    }
+
+    fn on_model_update(&mut self, update: UiUpdate, _ctx: &mut RuntimeContext) {
+        match update {
+            UiUpdate::StreamDelta(text) => {
+                if let Some(last) = self.history.messages.last_mut() {
+                    last.push_str(&text);
+                } else {
+                    self.history.messages.push(text);
+                }
+            }
+            UiUpdate::ToolApprovalRequest(req) => {
+                self.overlay = Some(OverlayState {
+                    kind: OverlayKind::ToolPermission(req),
+                });
+            }
+            UiUpdate::TurnComplete => {
+                self.turn_in_progress = false;
+            }
+            UiUpdate::Error(msg) => {
+                self.history.messages.push(format!("[error] {msg}"));
+                self.turn_in_progress = false;
+            }
+            _ => {}
+        }
+    }
+
+    fn is_turn_in_progress(&self) -> bool {
+        self.turn_in_progress
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1134,7 +1223,8 @@ impl App {
 
                 match response {
                     Ok(response) => {
-                        let _ = update_tx.send(UiUpdate::TurnComplete(response));
+                        let _ = response;
+                        let _ = update_tx.send(UiUpdate::TurnComplete);
                     }
                     Err(e) => {
                         let _ = update_tx.send(UiUpdate::Error(e.to_string()));
@@ -1389,27 +1479,13 @@ impl App {
                                     }
                                 }
                             }
-                            Some(UiUpdate::TurnComplete(text)) => {
+                            Some(UiUpdate::TurnComplete) => {
                                 if self.suppress_until_turn_complete {
                                     self.suppress_until_turn_complete = false;
                                     if self.stream_printer.turn_active {
                                         self.stream_printer.end_turn()?;
                                     }
                                     break;
-                                }
-                                if !text.is_empty() {
-                                    let needs_fallback_response = !self.stream_printer.has_streamed_delta()
-                                        || (self.stream_printer.structured_blocks_enabled
-                                            && !self.stream_printer.saw_response_block());
-                                    if needs_fallback_response {
-                                        if self.stream_printer.structured_blocks_enabled
-                                            && !self.stream_printer.saw_response_block()
-                                        {
-                                            self.stream_printer.print_activity_header(LineStyle::Normal, "* Response")?;
-                                            self.stream_printer.active_block = BlockKind::Response;
-                                        }
-                                        self.stream_printer.buffer_token(&text)?;
-                                    }
                                 }
                                 self.stream_printer.end_turn()?;
                                 break;
@@ -1697,18 +1773,12 @@ impl App {
                     response_tx,
                 });
             }
-            Some(UiUpdate::TurnComplete(text)) => {
+            Some(UiUpdate::TurnComplete) => {
                 self.pending_tool_approval = None;
                 if self.suppress_until_turn_complete {
                     self.suppress_until_turn_complete = false;
                     self.finish_tui_turn();
                     return Ok(());
-                }
-                if !text.is_empty() {
-                    let idx = self.ensure_assistant_message();
-                    if self.messages[idx].trim().is_empty() {
-                        self.messages[idx] = text;
-                    }
                 }
                 self.finish_tui_turn();
             }
@@ -3393,6 +3463,10 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    fn dummy_ctx<'a>(conversation: &'a mut ConversationManager) -> RuntimeContext<'a> {
+        RuntimeContext { conversation }
+    }
+
     #[tokio::test]
     async fn test_crit_03_state_sync() {
         let state = Arc::new(AtomicUsize::new(0));
@@ -3940,6 +4014,38 @@ mod tests {
         assert_eq!(
             tool_prompt_decision_from_text("no"),
             Some(ToolPromptDecision::CancelNewTask)
+        );
+    }
+
+    #[test]
+    fn test_ref_03_tui_mode_overlay_blocks_input() {
+        use crate::api::{mock_client::MockApiClient, ApiClient};
+        use crate::runtime::mode::RuntimeMode;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mock_api_client = ApiClient::new_mock(Arc::new(MockApiClient::new(vec![])));
+        let mut conversation = ConversationManager::new_mock(mock_api_client, HashMap::new());
+        let mut ctx = dummy_ctx(&mut conversation);
+
+        let mut mode = TuiMode::new();
+        assert!(!mode.is_turn_in_progress());
+
+        let req = ToolApprovalRequest::test_stub();
+        mode.on_model_update(UiUpdate::ToolApprovalRequest(req), &mut ctx);
+
+        assert!(mode.overlay.is_some());
+        mode.on_user_input("should be ignored".to_string(), &mut ctx);
+        assert!(
+            !mode.is_turn_in_progress(),
+            "turn must not start while overlay is active"
+        );
+
+        mode.overlay = None;
+        mode.on_user_input("now accepted".to_string(), &mut ctx);
+        assert!(
+            mode.is_turn_in_progress(),
+            "turn should start after overlay cleared"
         );
     }
 }
