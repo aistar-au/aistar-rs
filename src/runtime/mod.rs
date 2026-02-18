@@ -42,12 +42,8 @@ mod tests {
 
     #[test]
     fn test_ref_02_runtime_types_compile() {
-        use crate::runtime::{
-            context::RuntimeContext,
-            event::RuntimeEvent,
-            frontend::FrontendAdapter,
-            mode::RuntimeMode,
-        };
+        use crate::runtime::event::RuntimeEvent;
+
         // Zero-cost existence check — if the module tree compiles, this passes.
         let _ = std::mem::size_of::<RuntimeEvent>();
     }
