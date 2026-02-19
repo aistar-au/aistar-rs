@@ -137,7 +137,7 @@ in code review and CI:
 7. **Idle interrupt output:** `on_interrupt` MUST produce user-visible output
    regardless of `turn_in_progress` state (ADR-009 §2).
 
-8. **Scope discipline:** CORE-07 through FEAT-14 and TUI-01 through TUI-05 MUST NOT
+8. **Scope discipline:** CORE-07 through CORE-14 and FEAT-10 through FEAT-16 MUST NOT
    add new `UiUpdate` variants, new env vars (except `MAX_HISTORY_LINES`), or touch
    `src/state/`, `src/api/`, or `src/tools/`.
 
