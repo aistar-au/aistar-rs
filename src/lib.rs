@@ -9,3 +9,4 @@ pub mod tool_preview;
 pub mod tools;
 pub mod types;
 pub mod ui;
+pub mod util;

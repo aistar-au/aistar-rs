@@ -1,13 +1,13 @@
 use super::stream_block::{StreamBlock, ToolStatus};
 use crate::api::{stream::StreamParser, ApiClient};
 use crate::edit_diff::DEFAULT_EDIT_DIFF_CONTEXT_LINES;
-use crate::runtime::parse_bool_flag;
 use crate::tool_preview::{
     format_read_file_snapshot_message, preview_tool_input, read_file_path, ReadFileSnapshotCache,
     ReadFileSummaryMessageStyle, ToolPreviewStyle,
 };
 use crate::tools::ToolExecutor;
 use crate::types::{ApiMessage, Content, ContentBlock, StreamEvent};
+use crate::util::parse_bool_flag;
 use anyhow::bail;
 use anyhow::Result;
 use futures::StreamExt;
@@ -1686,6 +1686,21 @@ cal.js
     fn test_default_tool_approval_enabled_prefers_remote_only() {
         assert!(default_tool_approval_enabled(false));
         assert!(!default_tool_approval_enabled(true));
+    }
+
+    #[test]
+    fn test_env_bool_off_is_false_across_state_paths() {
+        std::env::set_var("AISTAR_STREAM_LOCAL_TOOL_EVENTS", "off");
+        std::env::set_var("AISTAR_STREAM_SERVER_EVENTS", "off");
+        std::env::set_var("AISTAR_TOOL_CONFIRM", "off");
+
+        assert!(!stream_local_tool_events_enabled());
+        assert!(!stream_server_events_enabled());
+        assert!(!tool_approval_enabled(false));
+
+        std::env::remove_var("AISTAR_STREAM_LOCAL_TOOL_EVENTS");
+        std::env::remove_var("AISTAR_STREAM_SERVER_EVENTS");
+        std::env::remove_var("AISTAR_TOOL_CONFIRM");
     }
 
     #[test]

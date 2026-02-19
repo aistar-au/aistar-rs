@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::runtime::{is_local_endpoint_url, parse_bool_flag};
 use crate::types::{ApiMessage, Content, ContentBlock};
+use crate::util::{is_local_endpoint_url, parse_bool_flag};
 use anyhow::Result;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -598,6 +598,22 @@ mod tests {
 
         let expected_owned: BTreeSet<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(names, expected_owned);
+    }
+
+    #[test]
+    fn test_structured_tool_protocol_env_off_disables_protocol() {
+        std::env::set_var("AISTAR_STRUCTURED_TOOL_PROTOCOL", "off");
+        let config = crate::config::Config {
+            api_key: None,
+            model: "mock-model".to_string(),
+            api_url: "http://localhost:8000/v1/messages".to_string(),
+            anthropic_version: "2023-06-01".to_string(),
+            working_dir: std::path::PathBuf::from("."),
+        };
+
+        let client = ApiClient::new(&config).expect("client should build");
+        assert!(!client.supports_structured_tool_protocol());
+        std::env::remove_var("AISTAR_STRUCTURED_TOOL_PROTOCOL");
     }
 
     #[test]

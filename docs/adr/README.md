@@ -28,9 +28,10 @@ A task manifest may reference an ADR. An ADR may spawn one or more tasks. They a
 | [ADR-001](ADR-001-tdm-agentic-manifest-strategy.md) | Test-Driven Manifest (TDM) as primary agentic development methodology | Accepted |
 | [ADR-002](ADR-002-lexical-path-normalization.md) | Lexical path normalization over `fs::canonicalize()` in tool executor | Accepted |
 | [ADR-003](ADR-003-dual-protocol-api-auto-detection.md) | Dual-protocol API client with URL-inferred protocol selection | Accepted |
-| [ADR-004](ADR-004-runtime-seam-headless-first.md) | Runtime seam refactor — headless-first architecture (REF track) | Accepted |
+| [ADR-004](ADR-004-runtime-seam-headless-first.md) | Runtime seam refactor — headless-first architecture (REF track) | Superseded operationally by ADR-006 and ADR-007 |
 | [ADR-005](ADR-005-cfg-test-mock-injection.md) | `#[cfg(test)]` mock injection field on production `ApiClient` struct | Accepted |
 | [ADR-006](ADR-006-runtime-mode-contracts.md) | Runtime mode contracts — `RuntimeMode`, `RuntimeContext`, `RuntimeEvent`, `FrontendAdapter` | Accepted |
+| [ADR-007](ADR-007-runtime-canonical-dispatch-no-alt-routing.md) | Runtime-core canonical dispatch — no alternate routing | Accepted |
 
 ## Template
 

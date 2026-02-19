@@ -15,6 +15,8 @@
 3. **Module isolation** — Work is confined to the `Target File` named in the task manifest (± one helper file).
 4. **Verification** — Success is `cargo test <anchor_name>` passing, plus `cargo test --all` showing no regressions.
 
+Runtime mode additions and naming-policy changes require explicit confirmation before implementation or documentation. See ADR-007.
+
 See [`docs/dev/manifest-strategy.md`](docs/dev/manifest-strategy.md) for the operational guide.
 
 ---

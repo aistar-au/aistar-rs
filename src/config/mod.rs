@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::runtime::is_local_endpoint_url;
+use crate::util::is_local_endpoint_url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
