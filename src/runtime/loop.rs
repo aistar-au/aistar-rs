@@ -13,7 +13,12 @@ impl<M: RuntimeMode> Runtime<M> {
     pub fn new(mode: M, update_rx: mpsc::UnboundedReceiver<UiUpdate>) -> Self {
         Self { mode, update_rx }
     }
-    pub fn run<F>(&mut self, frontend: &mut F, ctx: &mut RuntimeContext)
+    /// Execute the runtime loop.
+    ///
+    /// Must be called within a Tokio runtime context (e.g., `#[tokio::main]`
+    /// or `block_on`). The async signature enforces `.await` at compile time
+    /// for the loop path.
+    pub async fn run<F>(&mut self, frontend: &mut F, ctx: &mut RuntimeContext)
     where
         F: FrontendAdapter,
     {
@@ -73,6 +78,7 @@ mod tests {
         }
     }
 
+    /// REF-07: renamed to async to match `run()` signature change.
     #[tokio::test]
     async fn test_ref_05_headless_loop_terminates() {
         let mock = Arc::new(MockApiClient::new(vec![]));
@@ -89,11 +95,32 @@ mod tests {
         let mut runtime = Runtime::new(mode, update_rx);
 
         let mut frontend = HeadlessFrontend::new(vec!["hello", "world"], 3);
-        runtime.run(&mut frontend, &mut ctx);
+        runtime.run(&mut frontend, &mut ctx).await;
 
         assert_eq!(
             frontend.render_count, 3,
             "loop must render exactly quit_after times before exiting"
         );
+    }
+
+    #[tokio::test]
+    async fn test_ref_07_async_run_terminates() {
+        let mock = Arc::new(MockApiClient::new(vec![]));
+        let client = ApiClient::new_mock(mock);
+        let conversation = ConversationManager::new_mock(client, HashMap::new());
+
+        let (tx, update_rx) = mpsc::unbounded_channel::<UiUpdate>();
+        let mut ctx = RuntimeContext::new(
+            conversation,
+            tx,
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let mode = crate::app::TuiMode::new();
+        let mut runtime = Runtime::new(mode, update_rx);
+
+        let mut frontend = HeadlessFrontend::new(vec!["hello"], 2);
+        runtime.run(&mut frontend, &mut ctx).await;
+
+        assert_eq!(frontend.render_count, 2);
     }
 }

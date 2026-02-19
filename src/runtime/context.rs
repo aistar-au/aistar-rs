@@ -30,6 +30,15 @@ impl RuntimeContext {
     }
 
     pub fn start_turn(&mut self, input: String) {
+        // Guard: refuse to spawn without an active Tokio runtime.
+        // Must precede push_user_message so history stays clean on error path.
+        if tokio::runtime::Handle::try_current().is_err() {
+            let _ = self.update_tx.send(UiUpdate::Error(
+                "runtime error: start_turn requires active Tokio runtime".to_string(),
+            ));
+            return;
+        }
+
         self.conversation.push_user_message(input);
 
         let turn_cancel = self.cancel.child_token();
@@ -134,5 +143,36 @@ mod tests {
 
         assert!(saw_delta, "expected at least one StreamDelta");
         assert!(saw_complete, "expected TurnComplete");
+    }
+
+    /// REF-07: calling start_turn without a Tokio runtime must not panic.
+    /// Emits UiUpdate::Error and leaves conversation history untouched.
+    #[test]
+    fn test_ref_07_no_runtime_guard() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UiUpdate>();
+        let client = ApiClient::new_mock(Arc::new(MockApiClient::new(vec![])));
+        let conversation = ConversationManager::new_mock(client, HashMap::new());
+        let mut ctx = RuntimeContext::new(conversation, tx, CancellationToken::new());
+
+        // No #[tokio::test] — no runtime is active.
+        ctx.start_turn("test".to_string());
+
+        // Must emit an error, not spawn.
+        let update = rx.try_recv().expect("expected error update");
+        match update {
+            UiUpdate::Error(msg) => {
+                assert!(
+                    msg.contains("requires active Tokio runtime"),
+                    "unexpected error message: {msg}"
+                );
+            }
+            _ => panic!("expected UiUpdate::Error, got something else"),
+        }
+
+        // No message appended to history on guard failure.
+        assert!(
+            ctx.conversation.messages_for_api().is_empty(),
+            "history must stay clean when guard fires"
+        );
     }
 }
