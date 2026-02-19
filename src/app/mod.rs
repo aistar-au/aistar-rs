@@ -5,15 +5,14 @@ use crate::runtime::frontend::FrontendAdapter;
 use crate::runtime::mode::RuntimeMode;
 use crate::runtime::r#loop::Runtime;
 use crate::runtime::UiUpdate;
-use crate::state::ConversationManager;
+use crate::state::{ConversationManager, ToolApprovalRequest};
 use crate::tools::ToolExecutor;
 use crate::ui::render::{input_visual_rows, render_input, render_messages, render_status_line};
 use anyhow::Result;
-use crossterm::event::{poll, read, Event, KeyCode, KeyModifiers};
+use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     backend::CrosstermBackend, layout::Constraint, layout::Direction, layout::Layout, Terminal,
 };
-use std::any::Any;
 use std::io::Stdout;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -21,9 +20,16 @@ use tokio_util::sync::CancellationToken;
 
 const INTERRUPT_TOKEN: &str = "__AISTAR_INTERRUPT__";
 
+struct PendingApproval {
+    tool_name: String,
+    input_preview: String,
+    response_tx: tokio::sync::oneshot::Sender<bool>,
+}
+
 pub struct TuiMode {
     history: Vec<String>,
-    overlay_active: bool,
+    pending_approval: Option<PendingApproval>,
+    auto_approve_session: bool,
     turn_in_progress: bool,
 }
 
@@ -31,18 +37,57 @@ impl TuiMode {
     pub fn new() -> Self {
         Self {
             history: Vec::new(),
-            overlay_active: false,
+            pending_approval: None,
+            auto_approve_session: false,
             turn_in_progress: false,
         }
     }
 
     fn status(&self) -> &'static str {
-        if self.overlay_active {
-            "awaiting tool approval"
+        if self.pending_approval.is_some() {
+            "awaiting tool approval (1/y, 2/a, 3/n/esc)"
         } else if self.turn_in_progress {
             "assistant is responding"
         } else {
             "ready"
+        }
+    }
+
+    fn overlay_active(&self) -> bool {
+        self.pending_approval.is_some()
+    }
+
+    fn resolve_pending_approval(&mut self, approved: bool) {
+        if let Some(pending) = self.pending_approval.take() {
+            let _ = pending.response_tx.send(approved);
+        }
+    }
+
+    fn handle_approval_input(&mut self, input: &str) {
+        let normalized = input.trim().to_lowercase();
+        let context = self
+            .pending_approval
+            .as_ref()
+            .map(|p| format!("{} {}", p.tool_name, p.input_preview))
+            .unwrap_or_else(|| "unknown".to_string());
+        match normalized.as_str() {
+            "1" | "y" | "yes" => {
+                self.history
+                    .push(format!("[tool approval accepted once: {context}]"));
+                self.resolve_pending_approval(true);
+            }
+            "2" | "a" | "always" => {
+                self.auto_approve_session = true;
+                self.history
+                    .push(format!("[tool approval enabled for session: {context}]"));
+                self.resolve_pending_approval(true);
+            }
+            "3" | "n" | "no" | "esc" => {
+                self.history
+                    .push(format!("[tool approval denied: {context}]"));
+                self.resolve_pending_approval(false);
+            }
+            _ => {}
         }
     }
 }
@@ -58,14 +103,19 @@ impl RuntimeMode for TuiMode {
         if input == INTERRUPT_TOKEN {
             if self.turn_in_progress {
                 ctx.cancel_turn();
+                self.resolve_pending_approval(false);
                 self.turn_in_progress = false;
-                self.overlay_active = false;
                 self.history.push("[turn cancelled]".to_string());
             }
             return;
         }
 
-        if self.overlay_active || self.turn_in_progress {
+        if self.overlay_active() {
+            self.handle_approval_input(&input);
+            return;
+        }
+
+        if self.turn_in_progress {
             return;
         }
 
@@ -86,22 +136,36 @@ impl RuntimeMode for TuiMode {
             UiUpdate::StreamBlockStart { .. }
             | UiUpdate::StreamBlockDelta { .. }
             | UiUpdate::StreamBlockComplete { .. } => {}
-            UiUpdate::ToolApprovalRequest(request) => {
-                self.overlay_active = true;
+            UiUpdate::ToolApprovalRequest(ToolApprovalRequest {
+                tool_name,
+                input_preview,
+                response_tx,
+            }) => {
+                if self.auto_approve_session {
+                    let _ = response_tx.send(true);
+                    self.history
+                        .push(format!("[auto-approved tool: {tool_name} session]"));
+                    return;
+                }
+
+                self.resolve_pending_approval(false);
                 self.history.push(format!(
-                    "[tool approval requested: {}] auto-deny",
-                    request.tool_name
+                    "[tool approval requested: {tool_name}] {input_preview}"
                 ));
-                let _ = request.response_tx.send(false);
-                self.overlay_active = false;
+                self.pending_approval = Some(PendingApproval {
+                    tool_name,
+                    input_preview,
+                    response_tx,
+                });
             }
             UiUpdate::TurnComplete => {
+                self.resolve_pending_approval(false);
                 self.turn_in_progress = false;
             }
             UiUpdate::Error(msg) => {
+                self.resolve_pending_approval(false);
                 self.history.push(format!("[error] {msg}"));
                 self.turn_in_progress = false;
-                self.overlay_active = false;
             }
         }
     }
@@ -109,16 +173,208 @@ impl RuntimeMode for TuiMode {
     fn is_turn_in_progress(&self) -> bool {
         self.turn_in_progress
     }
+}
 
-    fn as_any(&self) -> &dyn Any {
-        self
+#[derive(Clone)]
+struct EditorSnapshot {
+    buffer: String,
+    cursor: usize,
+}
+
+struct InputEditor {
+    buffer: String,
+    cursor: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    undo_stack: Vec<EditorSnapshot>,
+    redo_stack: Vec<EditorSnapshot>,
+}
+
+enum InputAction {
+    None,
+    Submit(String),
+    Interrupt,
+    Quit,
+}
+
+impl InputEditor {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_index: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        }
+    }
+
+    fn snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
+            buffer: self.buffer.clone(),
+            cursor: self.cursor,
+        }
+    }
+
+    fn push_undo(&mut self) {
+        self.undo_stack.push(self.snapshot());
+        self.redo_stack.clear();
+    }
+
+    fn restore(&mut self, snap: EditorSnapshot) {
+        self.buffer = snap.buffer;
+        self.cursor = snap.cursor.min(self.buffer.len());
+    }
+
+    fn insert_str(&mut self, value: &str) {
+        self.push_undo();
+        self.buffer.insert_str(self.cursor, value);
+        self.cursor += value.len();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        self.push_undo();
+        self.cursor -= 1;
+        self.buffer.remove(self.cursor);
+    }
+
+    fn delete(&mut self) {
+        if self.cursor >= self.buffer.len() {
+            return;
+        }
+        self.push_undo();
+        self.buffer.remove(self.cursor);
+    }
+
+    fn submit(&mut self) -> Option<String> {
+        let value = self.buffer.trim().to_string();
+        if value.is_empty() {
+            return None;
+        }
+        self.history.push(self.buffer.clone());
+        self.history_index = None;
+        self.push_undo();
+        self.buffer.clear();
+        self.cursor = 0;
+        Some(value)
+    }
+
+    fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+
+        let next_index = match self.history_index {
+            Some(idx) if idx > 0 => idx - 1,
+            Some(_) => 0,
+            None => self.history.len().saturating_sub(1),
+        };
+        self.history_index = Some(next_index);
+        self.buffer = self.history[next_index].clone();
+        self.cursor = self.buffer.len();
+    }
+
+    fn history_down(&mut self) {
+        let Some(idx) = self.history_index else {
+            return;
+        };
+
+        if idx + 1 >= self.history.len() {
+            self.history_index = None;
+            self.buffer.clear();
+            self.cursor = 0;
+        } else {
+            let next = idx + 1;
+            self.history_index = Some(next);
+            self.buffer = self.history[next].clone();
+            self.cursor = self.buffer.len();
+        }
+    }
+
+    fn undo(&mut self) {
+        if let Some(previous) = self.undo_stack.pop() {
+            self.redo_stack.push(self.snapshot());
+            self.restore(previous);
+        }
+    }
+
+    fn redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push(self.snapshot());
+            self.restore(next);
+        }
+    }
+
+    fn apply_event(&mut self, event: Event) -> InputAction {
+        match event {
+            Event::Paste(text) => {
+                self.insert_str(&text);
+                InputAction::None
+            }
+            Event::Key(key) => self.apply_key(key),
+            _ => InputAction::None,
+        }
+    }
+
+    fn apply_key(&mut self, key: KeyEvent) -> InputAction {
+        match key.code {
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.buffer.is_empty() {
+                    return InputAction::Quit;
+                }
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return InputAction::Interrupt;
+            }
+            KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.insert_str("\n");
+            }
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.undo();
+            }
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.redo();
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.insert_str("\n");
+            }
+            KeyCode::Enter => {
+                if let Some(value) = self.submit() {
+                    return InputAction::Submit(value);
+                }
+            }
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Delete => self.delete(),
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(self.buffer.len());
+            }
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.buffer.len(),
+            KeyCode::Up => self.history_up(),
+            KeyCode::Down => self.history_down(),
+            KeyCode::Char(ch) => self.insert_str(&ch.to_string()),
+            KeyCode::Esc => {
+                if self.buffer.is_empty() {
+                    return InputAction::Submit("esc".to_string());
+                }
+            }
+            _ => {}
+        }
+
+        InputAction::None
     }
 }
 
 pub struct TuiFrontend {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     quit: bool,
-    input_buffer: String,
+    editor: InputEditor,
 }
 
 impl TuiFrontend {
@@ -126,43 +382,29 @@ impl TuiFrontend {
         Self {
             terminal,
             quit: false,
-            input_buffer: String::new(),
+            editor: InputEditor::new(),
         }
     }
 }
 
-impl FrontendAdapter for TuiFrontend {
+impl FrontendAdapter<TuiMode> for TuiFrontend {
     fn poll_user_input(&mut self) -> Option<String> {
         if poll(Duration::from_millis(16)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = read() {
-                match key.code {
-                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.quit = true;
-                    }
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return Some(INTERRUPT_TOKEN.to_string());
-                    }
-                    KeyCode::Enter => {
-                        let value = self.input_buffer.trim().to_string();
-                        self.input_buffer.clear();
-                        if !value.is_empty() {
-                            return Some(value);
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        self.input_buffer.pop();
-                    }
-                    KeyCode::Char(ch) => self.input_buffer.push(ch),
-                    _ => {}
+            if let Ok(event) = read() {
+                match self.editor.apply_event(event) {
+                    InputAction::None => {}
+                    InputAction::Submit(value) => return Some(value),
+                    InputAction::Interrupt => return Some(INTERRUPT_TOKEN.to_string()),
+                    InputAction::Quit => self.quit = true,
                 }
             }
         }
         None
     }
 
-    fn render<M: RuntimeMode>(&mut self, mode: &M) {
+    fn render(&mut self, mode: &TuiMode) {
         let _ = self.terminal.draw(|frame| {
-            let input_rows = input_visual_rows(&self.input_buffer, frame.area().width as usize)
+            let input_rows = input_visual_rows(&self.editor.buffer, frame.area().width as usize)
                 .clamp(1, 6) as u16;
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -173,20 +415,9 @@ impl FrontendAdapter for TuiFrontend {
                 ])
                 .split(frame.area());
 
-            if let Some(tui_mode) = mode.as_any().downcast_ref::<TuiMode>() {
-                render_messages(frame, chunks[0], &tui_mode.history, 0);
-                render_status_line(frame, chunks[1], tui_mode.status());
-            } else {
-                render_messages(frame, chunks[0], &[], 0);
-                render_status_line(frame, chunks[1], "runtime mode active");
-            }
-
-            render_input(
-                frame,
-                chunks[2],
-                &self.input_buffer,
-                self.input_buffer.len(),
-            );
+            render_messages(frame, chunks[0], &mode.history, 0);
+            render_status_line(frame, chunks[1], mode.status());
+            render_input(frame, chunks[2], &self.editor.buffer, self.editor.cursor);
         });
     }
 
@@ -239,20 +470,140 @@ impl Drop for App {
 mod tests {
     use super::*;
     use crate::api::{mock_client::MockApiClient, ApiClient};
+    use crossterm::event::KeyEvent;
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    #[tokio::test]
-    async fn test_ref_03_tui_mode_overlay_blocks_input() {
+    fn setup_ctx() -> RuntimeContext {
         let (tx, _rx) = mpsc::unbounded_channel::<UiUpdate>();
         let client = ApiClient::new_mock(Arc::new(MockApiClient::new(vec![])));
         let conversation = ConversationManager::new_mock(client, HashMap::new());
-        let mut ctx = RuntimeContext::new(conversation, tx, CancellationToken::new());
+        RuntimeContext::new(conversation, tx, CancellationToken::new())
+    }
 
+    #[tokio::test]
+    async fn test_ref_03_tui_mode_overlay_blocks_input() {
+        let mut ctx = setup_ctx();
         let mut mode = TuiMode::new();
-        mode.overlay_active = true;
-        mode.on_user_input("blocked".to_string(), &mut ctx);
 
+        let (response_tx, _rx) = tokio::sync::oneshot::channel::<bool>();
+        mode.on_model_update(
+            UiUpdate::ToolApprovalRequest(ToolApprovalRequest {
+                tool_name: "read_file".to_string(),
+                input_preview: "{}".to_string(),
+                response_tx,
+            }),
+            &mut ctx,
+        );
+
+        mode.on_user_input("blocked".to_string(), &mut ctx);
         assert!(!mode.turn_in_progress, "overlay must block input dispatch");
+
+        mode.on_user_input("1".to_string(), &mut ctx);
+        assert!(
+            !mode.overlay_active(),
+            "overlay should clear after decision"
+        );
+
+        mode.on_user_input("resume".to_string(), &mut ctx);
+        assert!(
+            mode.turn_in_progress,
+            "dispatch should resume after overlay clears"
+        );
+    }
+
+    #[test]
+    fn test_editor_cursor_navigation() {
+        let mut editor = InputEditor::new();
+        editor.apply_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE));
+        assert_eq!(editor.buffer, "aXbc");
+    }
+
+    #[test]
+    fn test_editor_history_up_down() {
+        let mut editor = InputEditor::new();
+        editor.buffer = "first".to_string();
+        let _ = editor.submit();
+        editor.buffer = "second".to_string();
+        let _ = editor.submit();
+
+        editor.apply_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(editor.buffer, "second");
+        editor.apply_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(editor.buffer, "first");
+        editor.apply_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(editor.buffer, "second");
+    }
+
+    #[test]
+    fn test_editor_multiline_shortcuts() {
+        let mut editor = InputEditor::new();
+        editor.apply_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert_eq!(editor.buffer, "a\nb\nc");
+    }
+
+    #[test]
+    fn test_editor_undo_redo() {
+        let mut editor = InputEditor::new();
+        editor.apply_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+        assert_eq!(editor.buffer, "a");
+        editor.apply_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert_eq!(editor.buffer, "ab");
+    }
+
+    #[test]
+    fn test_editor_paste_handling() {
+        let mut editor = InputEditor::new();
+        let _ = editor.apply_event(Event::Paste("hello".to_string()));
+        assert_eq!(editor.buffer, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_tool_approval_accept_once() {
+        let mut ctx = setup_ctx();
+        let mut mode = TuiMode::new();
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel::<bool>();
+
+        mode.on_model_update(
+            UiUpdate::ToolApprovalRequest(ToolApprovalRequest {
+                tool_name: "read_file".to_string(),
+                input_preview: "{}".to_string(),
+                response_tx,
+            }),
+            &mut ctx,
+        );
+        mode.on_user_input("1".to_string(), &mut ctx);
+
+        assert!(response_rx.await.expect("response should resolve"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_approval_deny() {
+        let mut ctx = setup_ctx();
+        let mut mode = TuiMode::new();
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel::<bool>();
+
+        mode.on_model_update(
+            UiUpdate::ToolApprovalRequest(ToolApprovalRequest {
+                tool_name: "read_file".to_string(),
+                input_preview: "{}".to_string(),
+                response_tx,
+            }),
+            &mut ctx,
+        );
+        mode.on_user_input("n".to_string(), &mut ctx);
+
+        assert!(!response_rx.await.expect("response should resolve"));
     }
 }

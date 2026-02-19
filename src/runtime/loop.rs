@@ -20,7 +20,7 @@ impl<M: RuntimeMode> Runtime<M> {
     /// for the loop path.
     pub async fn run<F>(&mut self, frontend: &mut F, ctx: &mut RuntimeContext)
     where
-        F: FrontendAdapter,
+        F: FrontendAdapter<M>,
     {
         loop {
             if frontend.should_quit() {
@@ -64,12 +64,12 @@ mod tests {
         }
     }
 
-    impl FrontendAdapter for HeadlessFrontend {
+    impl FrontendAdapter<crate::app::TuiMode> for HeadlessFrontend {
         fn poll_user_input(&mut self) -> Option<String> {
             self.inputs.pop_front()
         }
 
-        fn render<N: RuntimeMode>(&mut self, _mode: &N) {
+        fn render(&mut self, _mode: &crate::app::TuiMode) {
             self.render_count += 1;
         }
 

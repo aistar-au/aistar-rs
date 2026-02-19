@@ -15,7 +15,7 @@ mod tests {
         assert_eq!(crate::util::parse_bool_str("true"), Some(true));
         assert_eq!(crate::util::parse_bool_str("0"), Some(false));
         assert_eq!(crate::util::parse_bool_flag("YES".to_string()), Some(true));
-        assert_eq!(crate::util::parse_bool_flag("off".to_string()), None);
+        assert_eq!(crate::util::parse_bool_flag("off".to_string()), Some(false));
         assert_eq!(crate::util::parse_bool_str("maybe"), None);
     }
 
@@ -27,7 +27,7 @@ mod tests {
         };
 
         fn _uses_runtime_mode_trait<T: RuntimeMode>() {}
-        fn _uses_frontend_adapter_trait<T: FrontendAdapter>() {}
+        fn _uses_frontend_adapter_trait<T: FrontendAdapter<DummyMode>>() {}
 
         struct DummyMode;
         impl RuntimeMode for DummyMode {
@@ -41,17 +41,14 @@ mod tests {
             fn is_turn_in_progress(&self) -> bool {
                 false
             }
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
         }
 
         struct DummyFrontend;
-        impl FrontendAdapter for DummyFrontend {
+        impl FrontendAdapter<DummyMode> for DummyFrontend {
             fn poll_user_input(&mut self) -> Option<String> {
                 None
             }
-            fn render<M: RuntimeMode>(&mut self, _mode: &M) {}
+            fn render(&mut self, _mode: &DummyMode) {}
             fn should_quit(&self) -> bool {
                 true
             }

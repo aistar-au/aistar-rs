@@ -8,8 +8,8 @@ pub fn parse_bool_flag(s: String) -> Option<bool> {
 /// Parse "true"/"false"/"1"/"0" from a &str.
 pub fn parse_bool_str(s: &str) -> Option<bool> {
     match s.trim().to_lowercase().as_str() {
-        "true" | "1" | "yes" => Some(true),
-        "false" | "0" | "no" => Some(false),
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
         _ => None,
     }
 }
@@ -42,7 +42,7 @@ mod tests {
         assert_eq!(parse_bool_str("true"), Some(true));
         assert_eq!(parse_bool_str("0"), Some(false));
         assert_eq!(parse_bool_flag("YES".to_string()), Some(true));
-        assert_eq!(parse_bool_flag("off".to_string()), None);
+        assert_eq!(parse_bool_flag("off".to_string()), Some(false));
         assert_eq!(parse_bool_str("maybe"), None);
     }
 

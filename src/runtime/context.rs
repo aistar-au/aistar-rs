@@ -212,4 +212,96 @@ mod tests {
             "exactly one TurnComplete"
         );
     }
+    #[tokio::test]
+    async fn test_ref_08_tool_approval_forwarding_no_hang() {
+        std::env::set_var("AISTAR_TOOL_CONFIRM", "true");
+        let first_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_tool_then_final_1","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_mock_round_1","name":"read_file","input":{}}}"#.to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"file.txt\"}"}}"#.to_string(),
+            r#"event: content_block_stop
+data: {"type":"content_block_stop","index":1}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":10}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+
+        let second_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_tool_then_final_2","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":7}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<UiUpdate>();
+        let client = ApiClient::new_mock(Arc::new(MockApiClient::new(vec![
+            first_response_sse,
+            second_response_sse,
+        ])));
+        let conversation = ConversationManager::new_mock(client, HashMap::new());
+        let mut ctx = RuntimeContext::new(conversation, tx, CancellationToken::new());
+
+        ctx.start_turn("read file".to_string());
+
+        let mut saw_request = false;
+        let mut saw_complete = false;
+        loop {
+            match tokio::time::timeout(Duration::from_millis(800), rx.recv()).await {
+                Ok(Some(UiUpdate::ToolApprovalRequest(request))) => {
+                    saw_request = true;
+                    let _ = request.response_tx.send(false);
+                }
+                Ok(Some(UiUpdate::TurnComplete)) => {
+                    saw_complete = true;
+                    break;
+                }
+                Ok(Some(UiUpdate::Error(e))) => panic!("unexpected error: {e}"),
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+
+        assert!(saw_request, "must forward tool approval request");
+        assert!(saw_complete, "must finish turn after approval response");
+        std::env::remove_var("AISTAR_TOOL_CONFIRM");
+    }
+
+    #[tokio::test]
+    async fn test_ref_08_cancel_path_emits_single_terminal_event() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<UiUpdate>();
+        let client = ApiClient::new_mock(Arc::new(MockApiClient::new(vec![vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n".to_string(),
+        ]])));
+        let conversation = ConversationManager::new_mock(client, HashMap::new());
+        let mut ctx = RuntimeContext::new(conversation, tx, CancellationToken::new());
+
+        ctx.start_turn("test".to_string());
+        ctx.cancel_turn();
+
+        let mut terminal_count = 0;
+        for _ in 0..6 {
+            match tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(UiUpdate::TurnComplete | UiUpdate::Error(_))) => terminal_count += 1,
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+
+        assert_eq!(
+            terminal_count, 1,
+            "cancel path must emit exactly one terminal event"
+        );
+    }
 }
