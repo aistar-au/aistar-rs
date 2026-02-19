@@ -1167,7 +1167,10 @@ impl App {
 
         let client = crate::api::ApiClient::new(&config)?;
         let executor = crate::tools::ToolExecutor::new(config.working_dir.clone());
-        let conversation = Arc::new(Mutex::new(ConversationManager::new(client, executor)));
+        let conversation = Arc::new(Mutex::new(ConversationManager::new(
+            Arc::new(client),
+            executor,
+        )));
 
         let conv_clone = Arc::clone(&conversation);
         task::spawn(async move {
@@ -4016,7 +4019,8 @@ mod tests {
         use std::sync::Arc;
 
         let mock_api_client = ApiClient::new_mock(Arc::new(MockApiClient::new(vec![])));
-        let mut conversation = ConversationManager::new_mock(mock_api_client, HashMap::new());
+        let mut conversation =
+            ConversationManager::new_mock(Arc::new(mock_api_client), HashMap::new());
         let mut ctx = dummy_ctx(&mut conversation);
 
         let mut mode = TuiMode::new();

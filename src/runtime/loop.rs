@@ -76,7 +76,7 @@ mod tests {
     fn test_ref_05_headless_loop_terminates() {
         let mock = Arc::new(MockApiClient::new(vec![]));
         let client = ApiClient::new_mock(mock);
-        let mut conversation = ConversationManager::new_mock(client, HashMap::new());
+        let mut conversation = ConversationManager::new_mock(Arc::new(client), HashMap::new());
         let mut ctx = RuntimeContext {
             conversation: &mut conversation,
         };

@@ -14,8 +14,9 @@ use futures::StreamExt;
 use std::collections::BTreeSet;
 #[cfg(test)]
 use std::collections::HashMap;
+use std::sync::Arc;
 #[cfg(test)]
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
@@ -62,7 +63,7 @@ struct HistoryLimits {
 }
 
 pub struct ConversationManager {
-    client: ApiClient,
+    client: Arc<ApiClient>,
     tool_executor: ToolExecutor,
     api_messages: Vec<ApiMessage>,
     current_turn_blocks: Vec<StreamBlock>,
@@ -72,7 +73,7 @@ pub struct ConversationManager {
 }
 
 impl ConversationManager {
-    pub fn new(client: ApiClient, executor: ToolExecutor) -> Self {
+    pub fn new(client: Arc<ApiClient>, executor: ToolExecutor) -> Self {
         Self {
             client,
             tool_executor: executor,
@@ -85,7 +86,10 @@ impl ConversationManager {
     }
 
     #[cfg(test)]
-    pub fn new_mock(client: ApiClient, tool_executor_responses: HashMap<String, String>) -> Self {
+    pub fn new_mock(
+        client: Arc<ApiClient>,
+        tool_executor_responses: HashMap<String, String>,
+    ) -> Self {
         Self {
             client,
             tool_executor: ToolExecutor::new(std::path::PathBuf::from("/tmp")), // Dummy executor
@@ -96,16 +100,28 @@ impl ConversationManager {
         }
     }
 
+    pub fn push_user_message(&mut self, input: String) {
+        self.api_messages.push(ApiMessage {
+            role: "user".to_string(),
+            content: Content::Text(input),
+        });
+    }
+
+    pub fn messages_for_api(&self) -> Vec<ApiMessage> {
+        self.api_messages.clone()
+    }
+
+    pub fn client(&self) -> Arc<ApiClient> {
+        Arc::clone(&self.client)
+    }
+
     pub async fn send_message(
         &mut self,
         content: String,
         stream_delta_tx: Option<&mpsc::UnboundedSender<ConversationStreamUpdate>>,
     ) -> Result<String> {
         self.current_turn_blocks.clear();
-        self.api_messages.push(ApiMessage {
-            role: "user".to_string(),
-            content: Content::Text(content),
-        });
+        self.push_user_message(content);
 
         let use_structured_tool_protocol = self.client.supports_structured_tool_protocol();
         let use_structured_blocks = structured_blocks_enabled();
@@ -1407,7 +1423,8 @@ data: {"type": "message_stop"}"#.to_string(),
         let mut mock_tool_responses = HashMap::new();
         mock_tool_responses.insert("file.txt".to_string(), "Hello from file.txt".to_string());
 
-        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+        let mut manager =
+            ConversationManager::new_mock(Arc::new(mock_api_client), mock_tool_responses);
 
         let final_text = manager
             .send_message("What is in file.txt?".into(), None)
@@ -1486,7 +1503,7 @@ data: {"type":"message_stop"}"#.to_string(),
                 response_sse,
             ])));
 
-        let mut manager = ConversationManager::new_mock(mock_api_client, HashMap::new());
+        let mut manager = ConversationManager::new_mock(Arc::new(mock_api_client), HashMap::new());
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         let final_text = manager
@@ -1556,7 +1573,8 @@ data: {"type":"message_stop"}"#.to_string(),
 
         let mut mock_tool_responses = HashMap::new();
         mock_tool_responses.insert("file.txt".to_string(), "hello".to_string());
-        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+        let mut manager =
+            ConversationManager::new_mock(Arc::new(mock_api_client), mock_tool_responses);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut saw_thinking_start = false;
@@ -1680,7 +1698,7 @@ cal.js
         let mock_api_client = ApiClient::new_mock(Arc::new(
             crate::api::mock_client::MockApiClient::new(vec![]),
         ));
-        let mut manager = ConversationManager::new_mock(mock_api_client, HashMap::new());
+        let mut manager = ConversationManager::new_mock(Arc::new(mock_api_client), HashMap::new());
         let input = serde_json::json!({ "path": "cal.rs" });
 
         let first = manager.format_tool_result_for_history(
@@ -1741,7 +1759,8 @@ data: {"type":"message_stop"}"#.to_string(),
 
         let mut mock_tool_responses = HashMap::new();
         mock_tool_responses.insert("file.txt".to_string(), "Hello from fallback.".to_string());
-        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+        let mut manager =
+            ConversationManager::new_mock(Arc::new(mock_api_client), mock_tool_responses);
 
         let final_text = manager.send_message("Read file".into(), None).await?;
         assert!(final_text.contains("<function=read_file>"));
@@ -1785,7 +1804,8 @@ data: {"type":"message_stop"}"#.to_string(),
             ])));
         let mut mock_tool_responses = HashMap::new();
         mock_tool_responses.insert("file.txt".to_string(), "Hello from fallback.".to_string());
-        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+        let mut manager =
+            ConversationManager::new_mock(Arc::new(mock_api_client), mock_tool_responses);
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut saw_tool_call_block = false;
@@ -1851,7 +1871,8 @@ data: {"type":"message_stop"}"#.to_string(),
             "file.txt".to_string(),
             "Hello from OpenAI stream.".to_string(),
         );
-        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+        let mut manager =
+            ConversationManager::new_mock(Arc::new(mock_api_client), mock_tool_responses);
 
         let final_text = manager.send_message("Read file".into(), None).await?;
         assert!(final_text.contains("Hello from OpenAI stream."));
@@ -1896,7 +1917,8 @@ data: {"type":"message_stop"}"#.to_string(),
             "file.txt".to_string(),
             "Hello local text protocol.".to_string(),
         );
-        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+        let mut manager =
+            ConversationManager::new_mock(Arc::new(mock_api_client), mock_tool_responses);
 
         let final_text = manager.send_message("Read file".into(), None).await?;
         assert!(final_text.contains("<function=read_file>"));
@@ -1957,7 +1979,7 @@ data: {"type":"message_stop"}"#.to_string(),
             ])));
 
         let executor = ToolExecutor::new(temp.path().to_path_buf());
-        let mut manager = ConversationManager::new(mock_api_client, executor);
+        let mut manager = ConversationManager::new(Arc::new(mock_api_client), executor);
 
         let final_text = manager
             .send_message("create calculator".to_string(), None)
@@ -1977,7 +1999,7 @@ data: {"type":"message_stop"}"#.to_string(),
             crate::api::mock_client::MockApiClient::new(vec![]),
         ));
         let executor = ToolExecutor::new(temp.path().to_path_buf());
-        let manager = ConversationManager::new(mock_api_client, executor);
+        let manager = ConversationManager::new(Arc::new(mock_api_client), executor);
 
         let err = manager
             .execute_tool(
@@ -2026,7 +2048,7 @@ data: {"type":"message_stop"}"#.to_string(),
             crate::api::mock_client::MockApiClient::new(vec![]),
         ));
         let executor = ToolExecutor::new(std::path::PathBuf::from("."));
-        let mut manager = ConversationManager::new(mock_api_client, executor);
+        let mut manager = ConversationManager::new(Arc::new(mock_api_client), executor);
 
         manager.api_messages = vec![
             ApiMessage {
@@ -2064,7 +2086,7 @@ data: {"type":"message_stop"}"#.to_string(),
             crate::api::mock_client::MockApiClient::new(vec![]),
         ));
         let executor = ToolExecutor::new(std::path::PathBuf::from("."));
-        let mut manager = ConversationManager::new(mock_api_client, executor);
+        let mut manager = ConversationManager::new(Arc::new(mock_api_client), executor);
 
         manager.api_messages = vec![
             ApiMessage {
@@ -2095,7 +2117,7 @@ data: {"type":"message_stop"}"#.to_string(),
             crate::api::mock_client::MockApiClient::new(vec![]),
         ));
         let executor = ToolExecutor::new(std::path::PathBuf::from("."));
-        let mut manager = ConversationManager::new(mock_api_client, executor);
+        let mut manager = ConversationManager::new(Arc::new(mock_api_client), executor);
 
         manager.api_messages = vec![
             ApiMessage {
@@ -2133,7 +2155,7 @@ data: {"type":"message_stop"}"#.to_string(),
             crate::api::mock_client::MockApiClient::new(vec![]),
         ));
         let executor = ToolExecutor::new(std::path::PathBuf::from("."));
-        let mut manager = ConversationManager::new(mock_api_client, executor);
+        let mut manager = ConversationManager::new(Arc::new(mock_api_client), executor);
 
         manager.api_messages = vec![
             ApiMessage {
@@ -2186,7 +2208,7 @@ data: {"type":"message_stop"}"#.to_string(),
             crate::api::mock_client::MockApiClient::new(vec![]),
         ));
         let executor = ToolExecutor::new(std::path::PathBuf::from("."));
-        let mut manager = ConversationManager::new(mock_api_client, executor);
+        let mut manager = ConversationManager::new(Arc::new(mock_api_client), executor);
 
         manager.api_messages = vec![
             ApiMessage {

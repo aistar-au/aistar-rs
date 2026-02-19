@@ -175,6 +175,15 @@ impl ApiClient {
         Ok(Box::pin(stream))
     }
 
+    pub async fn create_stream_with_cancel(
+        &self,
+        messages: &[ApiMessage],
+        token: tokio_util::sync::CancellationToken,
+    ) -> Result<ByteStream> {
+        let _ = token;
+        self.create_stream(messages).await
+    }
+
     fn request_url(&self) -> String {
         match self.api_protocol {
             ApiProtocol::AnthropicMessages => self.api_url.clone(),
