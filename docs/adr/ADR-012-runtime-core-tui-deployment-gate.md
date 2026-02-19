@@ -3,7 +3,8 @@
 **Date:** 2026-02-19
 **Status:** Accepted
 **Deciders:** Core maintainer
-**Related tasks:** Runtime-core TUI feature track (follow-up manifests)
+**Related tasks:** `TASKS/completed/REF-08-full-runtime-cutover.md`,
+`TASKS/completed/REF-08-deltas/`, runtime-core TUI feature follow-up manifests
 **Supersedes operationally:** none (consolidates ADR-009, ADR-010, ADR-011 for release gating)
 
 ## Context

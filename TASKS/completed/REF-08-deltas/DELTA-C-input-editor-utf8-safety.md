@@ -1,5 +1,8 @@
 # REF-08 DELTA-C: UTF-8 safe InputEditor
 
+**Status:** Completed and verified (2026-02-19)
+**ADR mapping:** ADR-008 Decision #3; ADR-012 gate #1
+
 ## Problem
 
 Cursor, backspace, and delete operations can split multi-byte UTF-8 characters

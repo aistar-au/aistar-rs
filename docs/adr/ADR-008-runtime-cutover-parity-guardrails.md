@@ -3,7 +3,8 @@
 **Date:** 2026-02-19
 **Status:** Accepted
 **Deciders:** Core maintainer
-**Related tasks:** REF-08 delta set (A-F)
+**Related tasks:** `TASKS/completed/REF-08-full-runtime-cutover.md`,
+`TASKS/completed/REF-08-deltas/`
 **Supersedes operationally:** none (complements ADR-007)
 
 ## Context
@@ -56,4 +57,5 @@ and flaky test behavior while keeping runtime/frontend contracts explicit.
 1. `cargo test --all-targets`
 2. `bash scripts/check_no_alternate_routing.sh`
 3. `bash scripts/check_forbidden_imports.sh`
-4. REF-08 targeted tests listed in `docs/dev/ref-08/review-checklist.md`
+4. REF-08 targeted tests listed in
+   `TASKS/completed/REF-08-deltas/review-checklist.md`

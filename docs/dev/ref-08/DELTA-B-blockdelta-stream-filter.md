@@ -1,5 +1,8 @@
 # REF-08 DELTA-B: Filter BlockDelta -> StreamDelta mirroring
 
+**Status:** Completed and verified (2026-02-19)
+**ADR mapping:** ADR-008 Decision #2; ADR-012 gate #4 (overlay/tool-stream correctness)
+
 ## Problem
 
 `ConversationStreamUpdate::BlockDelta` mirrored unconditionally to

@@ -1,5 +1,8 @@
 # REF-08 DELTA-D: Strict frontend poll contract
 
+**Status:** Completed and verified (2026-02-19)
+**ADR mapping:** ADR-008 Decision #4; ADR-012 gate #2
+
 ## Problem
 
 The frontend poll path must be mode-aware and typed; returning plain `String`

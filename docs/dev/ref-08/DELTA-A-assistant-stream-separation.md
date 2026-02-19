@@ -1,5 +1,8 @@
 # REF-08 DELTA-A: Assistant Stream Separation
 
+**Status:** Completed and verified (2026-02-19)
+**ADR mapping:** ADR-008 Decision #1; ADR-012 gate #1
+
 ## Problem
 
 `UiUpdate::StreamDelta` could append to the most recent history line, including

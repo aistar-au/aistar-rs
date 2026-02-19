@@ -1,5 +1,8 @@
 # REF-08 DELTA-E: Typed interrupt routing (no magic string)
 
+**Status:** Completed and verified (2026-02-19)
+**ADR mapping:** ADR-008 Decision #5; ADR-012 gate #2
+
 ## Problem
 
 Interrupt behavior must not rely on a sentinel text payload because user text can

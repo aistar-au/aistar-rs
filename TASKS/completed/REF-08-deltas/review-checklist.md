@@ -1,5 +1,8 @@
 # REF-08 Review Checklist
 
+**Status:** Completed and verified (2026-02-19)  
+**ADR mapping:** ADR-008 compliance checks; ADR-012 required verification
+
 ## Scope
 
 1. `src/app/mod.rs`
@@ -33,6 +36,7 @@
 9. `bash scripts/check_no_alternate_routing.sh`
 10. `bash scripts/check_forbidden_imports.sh`
 
-## Merge gate
+## Validation result
 
-All checks above must pass with no architecture contract violations.
+All checks above were validated as part of REF-08 completion with no
+architecture contract violations.

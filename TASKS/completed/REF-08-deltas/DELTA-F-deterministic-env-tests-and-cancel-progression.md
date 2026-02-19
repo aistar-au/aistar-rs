@@ -1,5 +1,8 @@
 # REF-08 DELTA-F: Deterministic env tests and cancel progression proof
 
+**Status:** Completed and verified (2026-02-19)
+**ADR mapping:** ADR-008 Decisions #6/#7; ADR-012 gate #7
+
 ## Problems
 
 1. Env-mutating tests can race under parallel execution.
