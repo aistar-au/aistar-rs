@@ -1,3 +1,4 @@
+use crate::api::ApiClient;
 use crate::config::Config;
 use crate::edit_diff::{format_edit_hunks, DEFAULT_EDIT_DIFF_CONTEXT_LINES};
 use crate::runtime::context::RuntimeContext;
@@ -1165,7 +1166,7 @@ impl App {
         let (update_tx, update_rx) = mpsc::unbounded_channel();
         let (message_tx, mut message_rx) = mpsc::unbounded_channel();
 
-        let client = crate::api::ApiClient::new(&config)?;
+        let client = ApiClient::new(&config)?;
         let executor = crate::tools::ToolExecutor::new(config.working_dir.clone());
         let conversation = Arc::new(Mutex::new(ConversationManager::new(client, executor)));
 
