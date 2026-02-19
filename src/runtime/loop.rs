@@ -86,11 +86,8 @@ mod tests {
         let conversation = ConversationManager::new_mock(client, HashMap::new());
 
         let (tx, update_rx) = mpsc::unbounded_channel::<UiUpdate>();
-        let mut ctx = RuntimeContext::new(
-            conversation,
-            tx,
-            tokio_util::sync::CancellationToken::new(),
-        );
+        let mut ctx =
+            RuntimeContext::new(conversation, tx, tokio_util::sync::CancellationToken::new());
         let mode = crate::app::TuiMode::new();
         let mut runtime = Runtime::new(mode, update_rx);
 
@@ -110,11 +107,8 @@ mod tests {
         let conversation = ConversationManager::new_mock(client, HashMap::new());
 
         let (tx, update_rx) = mpsc::unbounded_channel::<UiUpdate>();
-        let mut ctx = RuntimeContext::new(
-            conversation,
-            tx,
-            tokio_util::sync::CancellationToken::new(),
-        );
+        let mut ctx =
+            RuntimeContext::new(conversation, tx, tokio_util::sync::CancellationToken::new());
         let mode = crate::app::TuiMode::new();
         let mut runtime = Runtime::new(mode, update_rx);
 

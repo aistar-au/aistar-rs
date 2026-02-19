@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::runtime::{is_local_endpoint_url, parse_bool_flag};
 use crate::types::{ApiMessage, Content, ContentBlock};
+use crate::util::{is_local_endpoint_url, parse_bool_flag};
 use anyhow::Result;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};

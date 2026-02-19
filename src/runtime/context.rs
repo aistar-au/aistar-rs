@@ -1,15 +1,11 @@
 use crate::api::stream::StreamParser;
 use crate::runtime::UiUpdate;
-use crate::state::ConversationManager;
-use crate::types::StreamEvent;
+use crate::state::{ConversationManager, StreamBlock, ToolApprovalRequest, ToolStatus};
+use crate::types::{ContentBlock, Delta, StreamEvent};
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-/// Capability surface passed to `RuntimeMode` methods.
-///
-/// Owns `ConversationManager` (not a borrow) so that REF-05's runtime loop
-/// can hold it without a lifetime parameter. See ADR-006 §2.
 pub struct RuntimeContext {
     pub(crate) conversation: ConversationManager,
     pub(crate) update_tx: mpsc::UnboundedSender<UiUpdate>,
@@ -30,8 +26,6 @@ impl RuntimeContext {
     }
 
     pub fn start_turn(&mut self, input: String) {
-        // Guard: refuse to spawn without an active Tokio runtime.
-        // Must precede push_user_message so history stays clean on error path.
         if tokio::runtime::Handle::try_current().is_err() {
             let _ = self.update_tx.send(UiUpdate::Error(
                 "runtime error: start_turn requires active Tokio runtime".to_string(),
@@ -47,9 +41,10 @@ impl RuntimeContext {
         let client = self.conversation.client();
 
         tokio::spawn(async move {
-            let result = client.create_stream_with_cancel(&messages, turn_cancel.clone()).await;
-
-            match result {
+            match client
+                .create_stream_with_cancel(&messages, turn_cancel.clone())
+                .await
+            {
                 Ok(mut stream) => {
                     let mut parser = StreamParser::new();
                     while let Some(chunk_result) = stream.next().await {
@@ -77,15 +72,62 @@ impl RuntimeContext {
                             if turn_cancel.is_cancelled() {
                                 break;
                             }
-                            if let StreamEvent::ContentBlockDelta {
-                                delta: crate::types::Delta { text: Some(text), .. },
-                                ..
-                            } = event
-                            {
-                                let _ = tx.send(UiUpdate::StreamDelta(text));
+
+                            match event {
+                                StreamEvent::ContentBlockStart {
+                                    index,
+                                    content_block,
+                                } => {
+                                    let block =
+                                        content_block_to_stream_block(content_block.clone());
+                                    let _ = tx.send(UiUpdate::StreamBlockStart { index, block });
+                                    if let ContentBlock::ToolUse { name, input, .. } = content_block
+                                    {
+                                        let (response_tx, _response_rx) =
+                                            oneshot::channel::<bool>();
+                                        let _ = tx.send(UiUpdate::ToolApprovalRequest(
+                                            ToolApprovalRequest {
+                                                tool_name: name,
+                                                input_preview: input.to_string(),
+                                                response_tx,
+                                            },
+                                        ));
+                                    }
+                                }
+                                StreamEvent::ContentBlockDelta {
+                                    index,
+                                    delta: delta @ Delta { text: Some(_), .. },
+                                } => {
+                                    if let Some(text) = delta.text.clone() {
+                                        let _ = tx.send(UiUpdate::StreamBlockDelta {
+                                            index,
+                                            delta: text.clone(),
+                                        });
+                                        let _ = tx.send(UiUpdate::StreamDelta(text));
+                                    }
+                                }
+                                StreamEvent::ContentBlockDelta {
+                                    index,
+                                    delta:
+                                        Delta {
+                                            partial_json: Some(partial_json),
+                                            ..
+                                        },
+                                } => {
+                                    let _ = tx.send(UiUpdate::StreamBlockDelta {
+                                        index,
+                                        delta: partial_json,
+                                    });
+                                }
+                                StreamEvent::ContentBlockStop { index } => {
+                                    let _ = tx.send(UiUpdate::StreamBlockComplete { index });
+                                }
+                                StreamEvent::MessageStop => {}
+                                _ => {}
                             }
                         }
                     }
+
                     let _ = tx.send(UiUpdate::TurnComplete);
                 }
                 Err(e) => {
@@ -101,6 +143,30 @@ impl RuntimeContext {
     }
 }
 
+fn content_block_to_stream_block(content_block: ContentBlock) -> StreamBlock {
+    match content_block {
+        ContentBlock::Text { text } => StreamBlock::Thinking {
+            content: text,
+            collapsed: false,
+        },
+        ContentBlock::ToolUse { id, name, input } => StreamBlock::ToolCall {
+            id,
+            name,
+            input,
+            status: ToolStatus::Pending,
+        },
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => StreamBlock::ToolResult {
+            tool_call_id: tool_use_id,
+            output: content,
+            is_error,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::RuntimeContext;
@@ -109,6 +175,7 @@ mod tests {
     use crate::state::ConversationManager;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
@@ -123,13 +190,12 @@ mod tests {
         let conversation = ConversationManager::new_mock(client, HashMap::new());
 
         let mut ctx = RuntimeContext::new(conversation, tx, CancellationToken::new());
-
         ctx.start_turn("test input".to_string());
 
         let mut saw_delta = false;
         let mut saw_complete = false;
         loop {
-            match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+            match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
                 Ok(Some(UiUpdate::StreamDelta(_))) => saw_delta = true,
                 Ok(Some(UiUpdate::TurnComplete)) => {
                     saw_complete = true;
@@ -145,8 +211,6 @@ mod tests {
         assert!(saw_complete, "expected TurnComplete");
     }
 
-    /// REF-07: calling start_turn without a Tokio runtime must not panic.
-    /// Emits UiUpdate::Error and leaves conversation history untouched.
     #[test]
     fn test_ref_07_no_runtime_guard() {
         let (tx, mut rx) = mpsc::unbounded_channel::<UiUpdate>();
@@ -154,10 +218,8 @@ mod tests {
         let conversation = ConversationManager::new_mock(client, HashMap::new());
         let mut ctx = RuntimeContext::new(conversation, tx, CancellationToken::new());
 
-        // No #[tokio::test] — no runtime is active.
         ctx.start_turn("test".to_string());
 
-        // Must emit an error, not spawn.
         let update = rx.try_recv().expect("expected error update");
         match update {
             UiUpdate::Error(msg) => {
@@ -169,10 +231,53 @@ mod tests {
             _ => panic!("expected UiUpdate::Error, got something else"),
         }
 
-        // No message appended to history on guard failure.
         assert!(
             ctx.conversation.messages_for_api().is_empty(),
             "history must stay clean when guard fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ref_08_start_turn_full_protocol_parity() {
+        let chunks = vec![vec![
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".to_string(),
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n".to_string(),
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n".to_string(),
+            "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n".to_string(),
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_string(),
+        ]];
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<UiUpdate>();
+        let client = ApiClient::new_mock(Arc::new(MockApiClient::new(chunks)));
+        let conversation = ConversationManager::new_mock(client, HashMap::new());
+        let mut ctx = RuntimeContext::new(conversation, tx, CancellationToken::new());
+
+        ctx.start_turn("test".to_string());
+
+        let mut events: Vec<&str> = vec![];
+        loop {
+            match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                Ok(Some(UiUpdate::StreamBlockStart { .. })) => events.push("BlockStart"),
+                Ok(Some(UiUpdate::StreamBlockDelta { .. })) => events.push("BlockDelta"),
+                Ok(Some(UiUpdate::StreamBlockComplete { .. })) => events.push("BlockComplete"),
+                Ok(Some(UiUpdate::StreamDelta(_))) => events.push("Delta"),
+                Ok(Some(UiUpdate::TurnComplete)) => {
+                    events.push("TurnComplete");
+                    break;
+                }
+                Ok(Some(UiUpdate::Error(e))) => panic!("unexpected error: {e}"),
+                _ => break,
+            }
+        }
+
+        assert!(
+            events.contains(&"TurnComplete"),
+            "must terminate with TurnComplete"
+        );
+        assert_eq!(
+            events.iter().filter(|&&e| e == "TurnComplete").count(),
+            1,
+            "exactly one TurnComplete"
         );
     }
 }

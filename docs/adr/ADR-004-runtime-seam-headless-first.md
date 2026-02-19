@@ -1,7 +1,7 @@
 # ADR-004: Runtime seam refactor — headless-first architecture (REF track)
 
 **Date:** 2026-02-18  
-**Status:** Accepted  
+**Status:** Superseded operationally by ADR-006 and ADR-007  
 **Deciders:** Core maintainer  
 **Related tasks:** REF-02 through REF-06 in `TASKS/` (planned; to be created)  
 **Target completion:** v0.2.0

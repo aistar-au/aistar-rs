@@ -1,0 +1,26 @@
+name: Architecture Contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  arch-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93.1"
+
+      - name: Check no alternate routing
+        run: bash scripts/check_no_alternate_routing.sh
+
+      - name: Check forbidden imports
+        run: bash scripts/check_forbidden_imports.sh
+
+      - name: Run tests
+        run: cargo test --all-targets
