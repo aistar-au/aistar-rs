@@ -4,7 +4,7 @@
 **Track:** REF (Refactor)  
 **Parent ADR:** REF-06 (TUI Dispatch Integration)  
 **Closes:** REF-04-pre (ConversationManager dispatch surface)  
-**Merged as:** PR #7 (corrected from PR #8 draft)  
+**Merged as:** PR #8 (with follow-up adjustments in PR #9)  
 **Date:** 2026-02-19
 
 ---
