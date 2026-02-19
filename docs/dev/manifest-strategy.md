@@ -79,18 +79,17 @@ When delegating to an agent, always use the following template to maintain the T
 
 ---
 
-## Task Snapshot (February 18, 2026)
+## Task Snapshot
 
-Current archived manifests in `TASKS/completed/`:
-- `CORE-01-sse-parser.md`
-- `CORE-05-ui-event-display-contract.md`
-- `CORE-06-transcript-determinism-regression-gates.md`
-- `CRIT-01-protocol.md`
-- `CRIT-02-serde-fix.md`
-- `CRIT-03-state-sync.md`
-- `SEC-01-path-security.md`
+Archived manifests live in `TASKS/completed/`.
 
-If new work is opened, create manifests in `TASKS/` root first, then promote to `TASKS/completed/` after verification.
+Current highlights include:
+- Core and critical hardening manifests (`CORE-*`, `CRIT-*`, `SEC-*`).
+- Full runtime seam/cutover track:
+  `REF-02` through `REF-08` are archived in `TASKS/completed/`.
+
+If new work is opened, create manifests in `TASKS/` root first, then promote to
+`TASKS/completed/` after verification.
 
 ## 🔒 Security Design: Lexical + Canonical Guard
 In **SEC-01**, we avoid using `std::fs::canonicalize()` on non-existent target paths, but we do use canonicalization for guard checks on existing paths.
