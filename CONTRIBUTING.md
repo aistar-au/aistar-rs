@@ -35,7 +35,7 @@ See [`docs/dev/manifest-strategy.md`](docs/dev/manifest-strategy.md) for the ope
 | `CORE-XX` | Core infrastructure | `CORE-01-sse-parser.md` |
 | `DOC-XX` | Documentation | `DOC-01-api-docs.md` |
 
-Completed tasks move to `TASKS/COMPLETED/` — do not delete them.
+Completed tasks move to `TASKS/completed/` — do not delete them.
 
 ---
 

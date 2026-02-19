@@ -38,7 +38,7 @@ Adopt the **Test-Driven Manifest (TDM)** as the canonical workflow for all bug f
 
 5. **The human architect owns the red phase**: writing the failing test and the task manifest. Agents own the green phase: making the test pass without breaking existing anchors.
 
-6. **Completed tasks move to `TASKS/COMPLETED/`** rather than being deleted, forming an auditable repair history.
+6. **Completed tasks move to `TASKS/completed/`** rather than being deleted, forming an auditable repair history.
 
 ---
 
@@ -98,7 +98,7 @@ Standard ADR practice (as documented in this directory) is used for *architectur
 **Constraints imposed on future work:**
 - New bug reports must produce a task manifest + anchor test before any agent is dispatched. "Fix this" prompts with no manifest are out of scope for the TDM loop.
 - Task manifests must be kept under ~2 KB. If a task description grows beyond that, it is a signal to decompose the task.
-- The `TASKS/COMPLETED/` directory must not be purged as part of cleanup automation.
+- The `TASKS/completed/` directory must not be purged as part of cleanup automation.
 
 ---
 
