@@ -7,13 +7,19 @@ use crate::runtime::r#loop::Runtime;
 use crate::runtime::UiUpdate;
 use crate::state::ConversationManager;
 use crate::tools::ToolExecutor;
+use crate::ui::render::{input_visual_rows, render_input, render_messages, render_status_line};
 use anyhow::Result;
 use crossterm::event::{poll, read, Event, KeyCode, KeyModifiers};
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{
+    backend::CrosstermBackend, layout::Constraint, layout::Direction, layout::Layout, Terminal,
+};
+use std::any::Any;
 use std::io::Stdout;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+const INTERRUPT_TOKEN: &str = "__AISTAR_INTERRUPT__";
 
 pub struct TuiMode {
     history: Vec<String>,
@@ -29,6 +35,16 @@ impl TuiMode {
             turn_in_progress: false,
         }
     }
+
+    fn status(&self) -> &'static str {
+        if self.overlay_active {
+            "awaiting tool approval"
+        } else if self.turn_in_progress {
+            "assistant is responding"
+        } else {
+            "ready"
+        }
+    }
 }
 
 impl Default for TuiMode {
@@ -39,9 +55,21 @@ impl Default for TuiMode {
 
 impl RuntimeMode for TuiMode {
     fn on_user_input(&mut self, input: String, ctx: &mut RuntimeContext) {
+        if input == INTERRUPT_TOKEN {
+            if self.turn_in_progress {
+                ctx.cancel_turn();
+                self.turn_in_progress = false;
+                self.overlay_active = false;
+                self.history.push("[turn cancelled]".to_string());
+            }
+            return;
+        }
+
         if self.overlay_active || self.turn_in_progress {
             return;
         }
+
+        self.history.push(format!("> {input}"));
         self.turn_in_progress = true;
         ctx.start_turn(input);
     }
@@ -55,24 +83,35 @@ impl RuntimeMode for TuiMode {
                     self.history.push(text);
                 }
             }
-            UiUpdate::ToolApprovalRequest(_) => {
+            UiUpdate::StreamBlockStart { .. }
+            | UiUpdate::StreamBlockDelta { .. }
+            | UiUpdate::StreamBlockComplete { .. } => {}
+            UiUpdate::ToolApprovalRequest(request) => {
                 self.overlay_active = true;
+                self.history.push(format!(
+                    "[tool approval requested: {}] auto-deny",
+                    request.tool_name
+                ));
+                let _ = request.response_tx.send(false);
+                self.overlay_active = false;
             }
             UiUpdate::TurnComplete => {
                 self.turn_in_progress = false;
-                self.overlay_active = false;
             }
             UiUpdate::Error(msg) => {
                 self.history.push(format!("[error] {msg}"));
                 self.turn_in_progress = false;
                 self.overlay_active = false;
             }
-            _ => {}
         }
     }
 
     fn is_turn_in_progress(&self) -> bool {
         self.turn_in_progress
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -97,8 +136,11 @@ impl FrontendAdapter for TuiFrontend {
         if poll(Duration::from_millis(16)).unwrap_or(false) {
             if let Ok(Event::Key(key)) = read() {
                 match key.code {
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.quit = true;
+                    }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Some(INTERRUPT_TOKEN.to_string());
                     }
                     KeyCode::Enter => {
                         let value = self.input_buffer.trim().to_string();
@@ -118,8 +160,34 @@ impl FrontendAdapter for TuiFrontend {
         None
     }
 
-    fn render<M: RuntimeMode>(&mut self, _mode: &M) {
-        let _ = self.terminal.draw(|_frame| {});
+    fn render<M: RuntimeMode>(&mut self, mode: &M) {
+        let _ = self.terminal.draw(|frame| {
+            let input_rows = input_visual_rows(&self.input_buffer, frame.area().width as usize)
+                .clamp(1, 6) as u16;
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(input_rows),
+                ])
+                .split(frame.area());
+
+            if let Some(tui_mode) = mode.as_any().downcast_ref::<TuiMode>() {
+                render_messages(frame, chunks[0], &tui_mode.history, 0);
+                render_status_line(frame, chunks[1], tui_mode.status());
+            } else {
+                render_messages(frame, chunks[0], &[], 0);
+                render_status_line(frame, chunks[1], "runtime mode active");
+            }
+
+            render_input(
+                frame,
+                chunks[2],
+                &self.input_buffer,
+                self.input_buffer.len(),
+            );
+        });
     }
 
     fn should_quit(&self) -> bool {

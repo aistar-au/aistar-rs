@@ -41,6 +41,9 @@ mod tests {
             fn is_turn_in_progress(&self) -> bool {
                 false
             }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         struct DummyFrontend;

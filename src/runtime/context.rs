@@ -1,13 +1,11 @@
-use crate::api::stream::StreamParser;
 use crate::runtime::UiUpdate;
-use crate::state::{ConversationManager, StreamBlock, ToolApprovalRequest, ToolStatus};
-use crate::types::{ContentBlock, Delta, StreamEvent};
-use futures::StreamExt;
-use tokio::sync::{mpsc, oneshot};
+use crate::state::{ConversationManager, ConversationStreamUpdate};
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 pub struct RuntimeContext {
-    pub(crate) conversation: ConversationManager,
+    pub(crate) conversation: Arc<Mutex<ConversationManager>>,
     pub(crate) update_tx: mpsc::UnboundedSender<UiUpdate>,
     pub(crate) cancel: CancellationToken,
 }
@@ -19,7 +17,7 @@ impl RuntimeContext {
         cancel: CancellationToken,
     ) -> Self {
         Self {
-            conversation,
+            conversation: Arc::new(Mutex::new(conversation)),
             update_tx,
             cancel,
         }
@@ -33,105 +31,60 @@ impl RuntimeContext {
             return;
         }
 
-        self.conversation.push_user_message(input);
-
         let turn_cancel = self.cancel.child_token();
         let tx = self.update_tx.clone();
-        let messages = self.conversation.messages_for_api();
-        let client = self.conversation.client();
+        let conversation = Arc::clone(&self.conversation);
 
         tokio::spawn(async move {
-            match client
-                .create_stream_with_cancel(&messages, turn_cancel.clone())
-                .await
-            {
-                Ok(mut stream) => {
-                    let mut parser = StreamParser::new();
-                    while let Some(chunk_result) = stream.next().await {
-                        if turn_cancel.is_cancelled() {
-                            break;
-                        }
+            let (delta_tx, mut delta_rx) = mpsc::unbounded_channel::<ConversationStreamUpdate>();
 
-                        let chunk = match chunk_result {
-                            Ok(chunk) => chunk,
-                            Err(e) => {
-                                let _ = tx.send(UiUpdate::Error(e.to_string()));
-                                return;
-                            }
-                        };
+            let send_handle = tokio::spawn(async move {
+                let mut mgr = conversation.lock().await;
+                mgr.send_message(input, Some(&delta_tx)).await
+            });
 
-                        let events = match parser.process(&chunk) {
-                            Ok(events) => events,
-                            Err(e) => {
-                                let _ = tx.send(UiUpdate::Error(e.to_string()));
-                                return;
+            loop {
+                tokio::select! {
+                    _ = turn_cancel.cancelled() => {
+                        send_handle.abort();
+                        let _ = tx.send(UiUpdate::TurnComplete);
+                        return;
+                    }
+                    update = delta_rx.recv() => {
+                        match update {
+                            Some(ConversationStreamUpdate::Delta(text)) => {
+                                let _ = tx.send(UiUpdate::StreamDelta(text));
                             }
-                        };
-
-                        for event in events {
-                            if turn_cancel.is_cancelled() {
-                                break;
+                            Some(ConversationStreamUpdate::BlockStart { index, block }) => {
+                                let _ = tx.send(UiUpdate::StreamBlockStart { index, block });
                             }
-
-                            match event {
-                                StreamEvent::ContentBlockStart {
-                                    index,
-                                    content_block,
-                                } => {
-                                    let block =
-                                        content_block_to_stream_block(content_block.clone());
-                                    let _ = tx.send(UiUpdate::StreamBlockStart { index, block });
-                                    if let ContentBlock::ToolUse { name, input, .. } = content_block
-                                    {
-                                        let (response_tx, _response_rx) =
-                                            oneshot::channel::<bool>();
-                                        let _ = tx.send(UiUpdate::ToolApprovalRequest(
-                                            ToolApprovalRequest {
-                                                tool_name: name,
-                                                input_preview: input.to_string(),
-                                                response_tx,
-                                            },
-                                        ));
-                                    }
-                                }
-                                StreamEvent::ContentBlockDelta {
-                                    index,
-                                    delta: delta @ Delta { text: Some(_), .. },
-                                } => {
-                                    if let Some(text) = delta.text.clone() {
-                                        let _ = tx.send(UiUpdate::StreamBlockDelta {
-                                            index,
-                                            delta: text.clone(),
-                                        });
-                                        let _ = tx.send(UiUpdate::StreamDelta(text));
-                                    }
-                                }
-                                StreamEvent::ContentBlockDelta {
-                                    index,
-                                    delta:
-                                        Delta {
-                                            partial_json: Some(partial_json),
-                                            ..
-                                        },
-                                } => {
-                                    let _ = tx.send(UiUpdate::StreamBlockDelta {
-                                        index,
-                                        delta: partial_json,
-                                    });
-                                }
-                                StreamEvent::ContentBlockStop { index } => {
-                                    let _ = tx.send(UiUpdate::StreamBlockComplete { index });
-                                }
-                                StreamEvent::MessageStop => {}
-                                _ => {}
+                            Some(ConversationStreamUpdate::BlockDelta { index, delta }) => {
+                                let _ = tx.send(UiUpdate::StreamBlockDelta { index, delta: delta.clone() });
+                                let _ = tx.send(UiUpdate::StreamDelta(delta));
                             }
+                            Some(ConversationStreamUpdate::BlockComplete { index }) => {
+                                let _ = tx.send(UiUpdate::StreamBlockComplete { index });
+                            }
+                            Some(ConversationStreamUpdate::ToolApprovalRequest(request)) => {
+                                let _ = tx.send(UiUpdate::ToolApprovalRequest(request));
+                            }
+                            None => break,
                         }
                     }
+                }
+            }
 
+            match send_handle.await {
+                Ok(Ok(_)) => {
                     let _ = tx.send(UiUpdate::TurnComplete);
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let _ = tx.send(UiUpdate::Error(e.to_string()));
+                }
+                Err(e) => {
+                    if !e.is_cancelled() {
+                        let _ = tx.send(UiUpdate::Error(e.to_string()));
+                    }
                 }
             }
         });
@@ -140,30 +93,6 @@ impl RuntimeContext {
     pub fn cancel_turn(&mut self) {
         self.cancel.cancel();
         self.cancel = CancellationToken::new();
-    }
-}
-
-fn content_block_to_stream_block(content_block: ContentBlock) -> StreamBlock {
-    match content_block {
-        ContentBlock::Text { text } => StreamBlock::Thinking {
-            content: text,
-            collapsed: false,
-        },
-        ContentBlock::ToolUse { id, name, input } => StreamBlock::ToolCall {
-            id,
-            name,
-            input,
-            status: ToolStatus::Pending,
-        },
-        ContentBlock::ToolResult {
-            tool_use_id,
-            content,
-            is_error,
-        } => StreamBlock::ToolResult {
-            tool_call_id: tool_use_id,
-            output: content,
-            is_error,
-        },
     }
 }
 
@@ -190,6 +119,7 @@ mod tests {
         let conversation = ConversationManager::new_mock(client, HashMap::new());
 
         let mut ctx = RuntimeContext::new(conversation, tx, CancellationToken::new());
+
         ctx.start_turn("test input".to_string());
 
         let mut saw_delta = false;
@@ -231,8 +161,9 @@ mod tests {
             _ => panic!("expected UiUpdate::Error, got something else"),
         }
 
+        let guard = ctx.conversation.blocking_lock();
         assert!(
-            ctx.conversation.messages_for_api().is_empty(),
+            guard.messages_for_api().is_empty(),
             "history must stay clean when guard fires"
         );
     }
@@ -261,6 +192,7 @@ mod tests {
                 Ok(Some(UiUpdate::StreamBlockDelta { .. })) => events.push("BlockDelta"),
                 Ok(Some(UiUpdate::StreamBlockComplete { .. })) => events.push("BlockComplete"),
                 Ok(Some(UiUpdate::StreamDelta(_))) => events.push("Delta"),
+                Ok(Some(UiUpdate::ToolApprovalRequest(_))) => events.push("ToolApproval"),
                 Ok(Some(UiUpdate::TurnComplete)) => {
                     events.push("TurnComplete");
                     break;

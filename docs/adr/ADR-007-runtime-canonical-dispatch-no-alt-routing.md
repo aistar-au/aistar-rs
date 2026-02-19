@@ -4,7 +4,7 @@
 **Status:** Accepted
 **Deciders:** Core maintainer
 **Supersedes operationally:** ADR-004 (headless-first seam — now fully realized)
-**Related tasks:** TASKS/REF-08-full-runtime-cutover.md
+**Related tasks:** REF-08 runtime cutover task manifest (repository-local)
 
 ## Decision (normative)
 

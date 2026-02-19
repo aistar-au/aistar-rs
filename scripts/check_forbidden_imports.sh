@@ -4,7 +4,7 @@ set -euo pipefail
 FORBIDDEN_MODULES=(
     "runtime::context"
     "runtime::mode"
-    "runtime::loop"
+    "runtime::r#loop"
     "runtime::frontend"
     "runtime::update"
     "runtime::event"
