@@ -611,6 +611,33 @@ impl TuiFrontend {
     }
 }
 
+fn overlay_event_to_user_input(event: Event) -> Option<UserInputEvent> {
+    match event {
+        Event::Key(key) => match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(UserInputEvent::Interrupt)
+            }
+            KeyCode::Esc => Some(UserInputEvent::Text("esc".to_string())),
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                Some(UserInputEvent::Text(ch.to_string()))
+            }
+            _ => None,
+        },
+        Event::Paste(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(UserInputEvent::Text(trimmed.to_string()))
+            }
+        }
+        _ => None,
+    }
+}
+
 fn draw_tui_frame(frame: &mut Frame<'_>, mode: &TuiMode, input_state: &InputState) {
     let input_rows =
         input_visual_rows(&input_state.buffer, frame.area().width as usize).clamp(1, 6) as u16;
@@ -659,9 +686,12 @@ fn render_pass_order(mode: &TuiMode) -> Vec<RenderPass> {
 }
 
 impl FrontendAdapter<TuiMode> for TuiFrontend {
-    fn poll_user_input(&mut self, _mode: &TuiMode) -> Option<UserInputEvent> {
+    fn poll_user_input(&mut self, mode: &TuiMode) -> Option<UserInputEvent> {
         if poll(Duration::from_millis(16)).unwrap_or(false) {
             if let Ok(event) = read() {
+                if mode.overlay_active() {
+                    return overlay_event_to_user_input(event);
+                }
                 if let Some(command) = self.scroll_command_for_event(&event) {
                     return Some(UserInputEvent::Text(command));
                 }
@@ -777,6 +807,34 @@ mod tests {
             mode.history_state.turn_in_progress,
             "dispatch should resume after overlay clears"
         );
+    }
+
+    #[test]
+    fn overlay_blocks_submit() {
+        let overlay_none = overlay_event_to_user_input(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(
+            overlay_none.is_none(),
+            "overlay keymap must not route Enter as normal submit"
+        );
+
+        match overlay_event_to_user_input(Event::Key(KeyEvent::new(
+            KeyCode::Char('1'),
+            KeyModifiers::NONE,
+        ))) {
+            Some(UserInputEvent::Text(value)) => assert_eq!(value, "1"),
+            _ => panic!("overlay key '1' must route to modal action"),
+        }
+
+        match overlay_event_to_user_input(Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))) {
+            Some(UserInputEvent::Text(value)) => assert_eq!(value, "esc"),
+            _ => panic!("overlay Esc must route to modal deny action"),
+        }
     }
 
     #[test]
