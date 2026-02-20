@@ -1,7 +1,9 @@
 name: autofix
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Change to 'push' if you want it automatic, but see note below
+  # push:
+  #   branches: [ main ]
 
 permissions:
   contents: write
@@ -14,60 +16,63 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # If using 'push' trigger, you might need a PAT here to trigger subsequent workflows
+          # token: ${{ secrets.PAT }} 
 
-      - name: Install stable Rust (with rustfmt)
+      - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
 
-      - name: Install Taplo (TOML formatter)
+      - name: Install Taplo
         uses: uncenter/setup-taplo@v1
         with:
           version: "0.8.1"
 
-      # Normalize repo line endings so GitHub raw endpoints show proper multi-line files
-      - name: Normalize line endings (LF)
+      # 1. Ensure .gitattributes exists with LF policy
+      - name: Enforce .gitattributes
         run: |
-          set -euo pipefail
-          git add --renormalize .
-          echo "After renormalize:"
-          git status --porcelain || true
+          if [ ! -f .gitattributes ]; then
+            echo "* text=auto eol=lf" > .gitattributes
+            echo "*.png binary" >> .gitattributes
+            echo "*.jpg binary" >> .gitattributes
+          fi
 
-      - name: Rustfmt (apply)
+      # 2. Normalize line endings based on the file above
+      - name: Normalize line endings
+        run: |
+          git add .gitattributes
+          git add --renormalize .
+          # Optional: Verify changes occurred
+          git diff --cached --stat || true
+
+      - name: Rustfmt
         run: cargo fmt
 
-      - name: Taplo fmt (apply)
+      - name: Taplo fmt
         run: taplo fmt
 
-      # Optional: leave off until formatting is settled
-      - name: Cargo fix (apply)
-        run: cargo fix --allow-dirty --allow-staged || true
+      # REMOVED: cargo fix (Too dangerous for automation)
 
       - name: Debug diffs
         run: |
-          set -euo pipefail
-          echo "Cargo.toml line count:"
-          wc -l Cargo.toml || true
-          echo ""
           echo "Git status:"
-          git status --porcelain || true
-          echo ""
-          echo "Git diff (stat):"
-          git diff --stat || true
+          git status --porcelain
+          echo "Git diff stat:"
+          git diff --stat
 
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore: autofix formatting"
-          title: "chore: autofix formatting"
+          commit-message: "chore: autofix formatting and line endings"
+          title: "chore: autofix formatting and line endings"
           body: |
-            Automated formatting fixes:
-            - git add --renormalize .
+            Automated maintenance:
+            - Enforced LF line endings via .gitattributes
             - cargo fmt
             - taplo fmt
-            - cargo fix (best-effort)
-
-            Notes:
-            - If no PR is created, check the "Debug diffs" step output for an empty diff.
           branch: autofix/formatting
           delete-branch: true
+          # If you switch to 'push' trigger, add this to prevent loops:
+          # token: ${{ secrets.PAT }} 
+
