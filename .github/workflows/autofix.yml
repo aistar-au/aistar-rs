@@ -25,7 +25,6 @@ jobs:
         with:
           version: "0.8.1"
 
-      # --- 1. Show what git sees ---
       - name: Debug git tracked files
         run: |
           echo "=== All tracked files ==="
@@ -38,7 +37,6 @@ jobs:
             echo "❌ Cargo.toml is NOT tracked"
           fi
 
-      # --- 2. Show file bytes BEFORE any changes ---
       - name: Debug Cargo.toml bytes (before)
         run: |
           set -euo pipefail
@@ -50,12 +48,11 @@ jobs:
           python3 -c "
           data = open('Cargo.toml', 'rb').read()
           print(f'Size: {len(data)} bytes')
-          print(f'\\n count: {data.count(b\"\\n\")}')
-          print(f'\\r count: {data.count(b\"\\r\")}')
-          print(f'Ends with newline: {data.endswith(b\"\\n\")}')
+          print(f'\\n count: {data.count(b"\\n")}')
+          print(f'\\r count: {data.count(b"\\r")}')
+          print(f'Ends with newline: {data.endswith(b"\\n")}')
           "
 
-      # --- 3. FORCE fix Cargo.toml directly (no git ls-files dependency) ---
       - name: Force fix Cargo.toml line endings
         run: |
           set -euo pipefail
@@ -84,8 +81,10 @@ jobs:
                   data = data + b'\n'
               print("✅ Converted CR-only to LF")
           # Fix: CRLF to LF
-          elif b'\r\n' in 
+          elif b'\r\n' in data:
               data = data.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+              if not data.endswith(b'\n'):
+                  data = data + b'\n'
               print("✅ Converted CRLF to LF")
           else:
               print("⚠️  No line ending issues detected")
@@ -98,7 +97,6 @@ jobs:
           print(f"Ends with newline: {data.endswith(b'\\n')}")
           PY
 
-      # --- 4. Fix other tracked text files ---
       - name: Fix other tracked files
         run: |
           set -euo pipefail
@@ -106,9 +104,9 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          TEXT_EXT = {".rs",".toml",".yml",".yaml",".md",".txt",".json",".lock"}
+          TEXT_EXT = {".rs", ".toml", ".yml", ".yaml", ".md", ".txt", ".json", ".lock"}
 
-          out = subprocess.check_output(["git","ls-files","-z"])
+          out = subprocess.check_output(["git", "ls-files", "-z"])
           files = [p for p in out.split(b"\0") if p]
 
           changed = []
@@ -129,8 +127,12 @@ jobs:
                           modified = data + b'\n'
                       elif cr > 0 and nl == 0:
                           modified = data.replace(b'\r', b'\n')
-                      elif b'\r\n' in 
+                          if not modified.endswith(b'\n'):
+                              modified = modified + b'\n'
+                      elif b'\r\n' in data:
                           modified = data.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
+                          if not modified.endswith(b'\n'):
+                              modified = modified + b'\n'
                       if modified and modified != data:
                           p.write_bytes(modified)
                           changed.append(name)
@@ -142,7 +144,6 @@ jobs:
               print(" -", x)
           PY
 
-      # --- 5. Verify .gitattributes ---
       - name: Verify .gitattributes exists and enforces LF
         run: |
           set -euo pipefail
@@ -153,25 +154,21 @@ jobs:
           grep -q 'text=auto eol=lf' .gitattributes || exit 1
           echo "✅ .gitattributes verified"
 
-      # --- 6. Apply git renormalization ---
       - name: Normalize line endings (LF)
         run: |
           git add --renormalize . || true
           echo "After renormalize:"
           git status --porcelain || true
 
-      # --- 7. Apply formatters ---
       - name: Rustfmt (apply)
         run: cargo fmt
 
       - name: Taplo fmt (apply)
         run: taplo fmt
 
-      # --- 8. Stage ALL changes ---
       - name: Stage changes
         run: git add -A
 
-      # --- 9. Show file bytes AFTER all changes ---
       - name: Debug Cargo.toml bytes (after)
         run: |
           echo "=== Cargo.toml raw bytes (after) ==="
@@ -180,12 +177,11 @@ jobs:
           python3 -c "
           data = open('Cargo.toml', 'rb').read()
           print(f'Size: {len(data)} bytes')
-          print(f'\\n count: {data.count(b\"\\n\")}')
-          print(f'\\r count: {data.count(b\"\\r\")}')
-          print(f'Ends with newline: {data.endswith(b\"\\n\")}')
+          print(f'\\n count: {data.count(b"\\n")}')
+          print(f'\\r count: {data.count(b"\\r")}')
+          print(f'Ends with newline: {data.endswith(b"\\n")}')
           "
 
-      # --- 10. Final verification ---
       - name: Final debug summary
         run: |
           set -euo pipefail
@@ -193,7 +189,7 @@ jobs:
           git status --porcelain
           echo ""
           echo "=== Final Git diff stat ==="
-          git diff --stat
+          git diff --cached --stat
           echo ""
           CHANGED=$(git status -s | wc -l)
           echo "Total git changes: $CHANGED"
@@ -201,7 +197,6 @@ jobs:
             echo "::warning::No changes detected"
           fi
 
-      # --- 11. Create PR ---
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
         with:
@@ -210,8 +205,7 @@ jobs:
           body: |
             Automated fixes:
             - Added missing line terminators (LF)
-            - Converted CR-only/CRLF → LF
+            - Converted CR-only/CRLF -> LF
             - cargo fmt + taplo fmt
           branch: autofix/formatting
           delete-branch: true
-
