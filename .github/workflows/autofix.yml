@@ -45,13 +45,16 @@ jobs:
           echo ""
           echo "=== Cargo.toml stats ==="
           wc -c Cargo.toml
-          python3 -c "
-          data = open('Cargo.toml', 'rb').read()
-          print(f'Size: {len(data)} bytes')
-          print(f'\\n count: {data.count(b"\\n")}')
-          print(f'\\r count: {data.count(b"\\r")}')
-          print(f'Ends with newline: {data.endswith(b"\\n")}')
-          "
+          python3 - <<'PY'
+          data = open("Cargo.toml", "rb").read()
+          nl = data.count(b"\n")
+          cr = data.count(b"\r")
+          ends_with_lf = data.endswith(b"\n")
+          print(f"Size: {len(data)} bytes")
+          print(f"\\n count: {nl}")
+          print(f"\\r count: {cr}")
+          print(f"Ends with newline: {ends_with_lf}")
+          PY
 
       - name: Force fix Cargo.toml line endings
         run: |
@@ -65,7 +68,9 @@ jobs:
               exit(1)
 
           data = p.read_bytes()
-          print(f"Before: size={len(data)}, \\n={data.count(b'\\n')}, \\r={data.count(b'\\r')}")
+          nl = data.count(b"\n")
+          cr = data.count(b"\r")
+          print(f"Before: size={len(data)}, \\n={nl}, \\r={cr}")
 
           # Fix: if no line breaks, add LF at end
           if data.count(b'\n') == 0 and data.count(b'\r') == 0:
@@ -93,8 +98,11 @@ jobs:
 
           # Verify
           data = p.read_bytes()
-          print(f"After:  size={len(data)}, \\n={data.count(b'\\n')}, \\r={data.count(b'\\r')}")
-          print(f"Ends with newline: {data.endswith(b'\\n')}")
+          nl = data.count(b"\n")
+          cr = data.count(b"\r")
+          ends_with_lf = data.endswith(b"\n")
+          print(f"After:  size={len(data)}, \\n={nl}, \\r={cr}")
+          print(f"Ends with newline: {ends_with_lf}")
           PY
 
       - name: Fix other tracked files
@@ -174,13 +182,16 @@ jobs:
           echo "=== Cargo.toml raw bytes (after) ==="
           xxd Cargo.toml | head -30
           echo ""
-          python3 -c "
-          data = open('Cargo.toml', 'rb').read()
-          print(f'Size: {len(data)} bytes')
-          print(f'\\n count: {data.count(b"\\n")}')
-          print(f'\\r count: {data.count(b"\\r")}')
-          print(f'Ends with newline: {data.endswith(b"\\n")}')
-          "
+          python3 - <<'PY'
+          data = open("Cargo.toml", "rb").read()
+          nl = data.count(b"\n")
+          cr = data.count(b"\r")
+          ends_with_lf = data.endswith(b"\n")
+          print(f"Size: {len(data)} bytes")
+          print(f"\\n count: {nl}")
+          print(f"\\r count: {cr}")
+          print(f"Ends with newline: {ends_with_lf}")
+          PY
 
       - name: Final debug summary
         run: |
