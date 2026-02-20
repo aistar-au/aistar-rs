@@ -1,4 +1,3 @@
-   * text=auto eol=lf
-   *.png binary
-   *.lock text eol=lf
-   
+* text=auto eol=lf
+*.png binary
+*.lock text eol=lf
