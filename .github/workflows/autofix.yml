@@ -1,9 +1,7 @@
 name: autofix
 
 on:
-  workflow_dispatch: # Change to 'push' if you want it automatic, but see note below
-  # push:
-  #   branches: [ main ]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,63 +14,118 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # If using 'push' trigger, you might need a PAT here to trigger subsequent workflows
-          # token: ${{ secrets.PAT }} 
 
-      - name: Install stable Rust
+      - name: Install stable Rust (with rustfmt)
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
 
-      - name: Install Taplo
+      - name: Install Taplo (TOML formatter)
         uses: uncenter/setup-taplo@v1
         with:
           version: "0.8.1"
 
-      # 1. Ensure .gitattributes exists with LF policy
-      - name: Enforce .gitattributes
+      # --- 1. Detect CR-only line endings (before conversion) ---
+      - name: Debug newline bytes (Cargo.toml)
         run: |
-          if [ ! -f .gitattributes ]; then
-            echo "* text=auto eol=lf" > .gitattributes
-            echo "*.png binary" >> .gitattributes
-            echo "*.jpg binary" >> .gitattributes
-          fi
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("Cargo.toml")
+          if p.exists():
+              data = p.read_bytes()
+              print(f"Cargo.toml: \\n = {data.count(b'\\n')}, \\r = {data.count(b'\\r')}")
+              print("First 120 bytes (hex):", data[:120].hex())
+          else:
+              print("⚠️ Cargo.toml not found")
+          PY
 
-      # 2. Normalize line endings based on the file above
-      - name: Normalize line endings
+      # --- 2. Convert CR-only → LF (tracked files only) ---
+      - name: Convert CR-only line endings to LF (tracked files)
         run: |
-          git add .gitattributes
-          git add --renormalize .
-          # Optional: Verify changes occurred
-          git diff --cached --stat || true
+          set -euo pipefail
+          python3 - <<'PY'
+          import subprocess
+          from pathlib import Path
 
-      - name: Rustfmt
+          TEXT_EXT = {".rs",".toml",".yml",".yaml",".md",".txt",".json",".lock"}
+          ALWAYS = {"Cargo.toml","Cargo.lock",".gitattributes","README.md"}
+
+          out = subprocess.check_output(["git","ls-files","-z"])
+          files = [p for p in out.split(b"\0") if p]
+
+          changed = []
+          for b in files:
+              p = Path(b.decode("utf-8", "surrogateescape"))
+              if p.name in ALWAYS or p.suffix.lower() in TEXT_EXT:
+                  data = p.read_bytes()
+                  if b"\r" in data and b"\n" not in data:
+                      p.write_bytes(data.replace(b"\r", b"\n"))
+                      changed.append(str(p))
+
+          print(f"Converted {len(changed)} file(s) from CR-only to LF")
+          for x in changed[:200]:
+              print(" -", x)
+          PY
+
+      # --- 3. Verify .gitattributes exists (fail fast if missing) ---
+      - name: Verify .gitattributes exists and enforces LF
+        run: |
+          set -euo pipefail
+          test -f .gitattributes
+          grep -q 'text=auto eol=lf' .gitattributes
+
+      # --- 4. Apply git renormalization (CRLF↔LF) ---
+      - name: Normalize line endings (LF)
+        run: |
+          set -euo pipefail
+          git add --renormalize . || true
+          echo "After renormalize:"
+          git status --porcelain || true
+
+      # --- 5. Apply formatters ---
+      - name: Rustfmt (apply)
         run: cargo fmt
 
-      - name: Taplo fmt
+      - name: Taplo fmt (apply)
         run: taplo fmt
 
-      # REMOVED: cargo fix (Too dangerous for automation)
+      # --- 6. Stage ALL changes explicitly ---
+      - name: Stage changes
+        run: git add -A
 
-      - name: Debug diffs
+      # --- 7. Final verification ---
+      - name: Final debug summary
         run: |
-          echo "Git status:"
+          set -euo pipefail
+          echo "=== Final Git status ==="
           git status --porcelain
-          echo "Git diff stat:"
-          git diff --stat
+          echo ""
+          echo "=== Final Git diff stat ==="
+          git diff --stat --cached
+          echo ""
+          echo "=== Cargo.toml newline check (post-fix) ==="
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("Cargo.toml")
+          if p.exists():
+              data = p.read_bytes()
+              print(f"Cargo.toml: \\n = {data.count(b'\\n')}, \\r = {data.count(b'\\r')}")
+          PY
 
+      # --- 8. Create PR if changes exist ---
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore: autofix formatting and line endings"
-          title: "chore: autofix formatting and line endings"
+          commit-message: "chore: fix CR-only line endings + formatting"
+          title: "chore: fix CR-only line endings + formatting"
           body: |
-            Automated maintenance:
-            - Enforced LF line endings via .gitattributes
-            - cargo fmt
-            - taplo fmt
+            Automated fixes:
+            - Converted classic Mac CR-only line endings → LF
+            - Applied git renormalization (.gitattributes)
+            - cargo fmt + taplo fmt
+
+            This resolves GitHub Raw showing files as "1 line".
           branch: autofix/formatting
           delete-branch: true
-          # If you switch to 'push' trigger, add this to prevent loops:
-          # token: ${{ secrets.PAT }} 
 
