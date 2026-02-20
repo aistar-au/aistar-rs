@@ -73,6 +73,8 @@ pub struct TuiMode {
     history_state: HistoryState,
     overlay_state: OverlayState,
     history_line_cap: usize,
+    pending_quit: bool,
+    quit_requested: bool,
 }
 
 impl TuiMode {
@@ -81,12 +83,16 @@ impl TuiMode {
             history_state: HistoryState::default(),
             overlay_state: OverlayState::default(),
             history_line_cap: resolve_history_line_cap(),
+            pending_quit: false,
+            quit_requested: false,
         }
     }
 
     fn status(&self) -> &'static str {
         if self.overlay_state.pending_approval.is_some() {
             "awaiting tool approval (1/y, 2/a, 3/n/esc)"
+        } else if self.pending_quit {
+            "press Ctrl+C again to exit"
         } else if self.history_state.turn_in_progress {
             "assistant is responding"
         } else {
@@ -251,9 +257,12 @@ impl RuntimeMode for TuiMode {
         }
 
         if self.history_state.turn_in_progress {
+            self.push_history_line("[busy - turn in progress, input discarded]".to_string());
             return;
         }
 
+        self.pending_quit = false;
+        self.quit_requested = false;
         self.push_history_line(format!("> {input}"));
         self.push_history_line(String::new());
         self.history_state.active_assistant_index = Some(self.history_state.lines.len() - 1);
@@ -330,6 +339,16 @@ impl RuntimeMode for TuiMode {
             self.history_state.turn_in_progress = false;
             self.history_state.active_assistant_index = None;
             self.push_history_line("[turn cancelled]".to_string());
+            self.pending_quit = false;
+            self.quit_requested = false;
+            return;
+        }
+
+        if self.pending_quit {
+            self.quit_requested = true;
+        } else {
+            self.pending_quit = true;
+            self.push_history_line("[press Ctrl+C again to exit]".to_string());
         }
     }
 
@@ -685,8 +704,16 @@ fn render_pass_order(mode: &TuiMode) -> Vec<RenderPass> {
     order
 }
 
+fn frontend_should_quit_for_mode(mode: &TuiMode) -> bool {
+    mode.quit_requested
+}
+
 impl FrontendAdapter<TuiMode> for TuiFrontend {
     fn poll_user_input(&mut self, mode: &TuiMode) -> Option<UserInputEvent> {
+        if frontend_should_quit_for_mode(mode) {
+            self.quit = true;
+            return None;
+        }
         if poll(Duration::from_millis(16)).unwrap_or(false) {
             if let Ok(event) = read() {
                 if mode.overlay_active() {
@@ -949,6 +976,83 @@ mod tests {
             !mode.history_state.turn_in_progress,
             "scroll commands must not dispatch new turns"
         );
+    }
+
+    #[test]
+    fn test_idle_interrupt_shows_feedback() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+
+        assert!(!mode.history_state.turn_in_progress);
+        assert!(!mode.pending_quit);
+        assert!(!mode.quit_requested);
+
+        mode.on_interrupt(&mut ctx);
+        assert!(mode.pending_quit, "first idle interrupt must arm quit");
+        assert!(!mode.quit_requested, "first idle interrupt must not quit");
+        assert!(
+            mode.history_state
+                .lines
+                .iter()
+                .any(|line| line.contains("[press Ctrl+C again to exit]")),
+            "first idle interrupt must show user-visible feedback"
+        );
+
+        mode.on_interrupt(&mut ctx);
+        assert!(
+            mode.quit_requested,
+            "second idle interrupt must request quit"
+        );
+        assert!(
+            frontend_should_quit_for_mode(&mode),
+            "frontend quit path must observe mode quit request"
+        );
+    }
+
+    #[test]
+    fn test_input_drop_shows_feedback() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+
+        mode.history_state.turn_in_progress = true;
+        mode.on_user_input("hello".to_string(), &mut ctx);
+
+        assert!(
+            mode.history_state.turn_in_progress,
+            "busy input must not start a new turn"
+        );
+        assert!(
+            mode.history_state
+                .lines
+                .iter()
+                .any(|line| line.starts_with("[busy")),
+            "busy input must produce visible rejection feedback"
+        );
+        assert!(
+            !mode
+                .history_state
+                .lines
+                .iter()
+                .any(|line| line == "> hello"),
+            "discarded busy input must not be appended as user message"
+        );
+    }
+
+    #[test]
+    fn test_pending_quit_resets_on_new_turn_accept() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+
+        mode.on_interrupt(&mut ctx);
+        assert!(mode.pending_quit);
+
+        mode.on_user_input("resume".to_string(), &mut ctx);
+        assert!(
+            !mode.pending_quit,
+            "pending quit must reset when a new turn is accepted"
+        );
+        assert!(!mode.quit_requested);
+        assert!(mode.history_state.turn_in_progress);
     }
 
     #[test]
