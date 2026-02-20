@@ -83,6 +83,7 @@ pub struct TuiMode {
     history_state: HistoryState,
     overlay_state: OverlayState,
     history_line_cap: usize,
+    repo_label: String,
     pending_quit: bool,
     quit_requested: bool,
 }
@@ -93,21 +94,42 @@ impl TuiMode {
             history_state: HistoryState::default(),
             overlay_state: OverlayState::default(),
             history_line_cap: resolve_history_line_cap(),
+            repo_label: resolve_repo_label(),
             pending_quit: false,
             quit_requested: false,
         }
     }
 
-    fn status(&self) -> &'static str {
+    fn mode_status_label(&self) -> &'static str {
         if self.overlay_state.pending_approval.is_some() {
-            "awaiting tool approval (1/y, 2/a, 3/n/esc)"
+            "overlay"
         } else if self.pending_quit {
-            "press Ctrl+C again to exit"
+            "quit-arm"
         } else if self.history_state.turn_in_progress {
-            "assistant is responding"
+            "streaming"
         } else {
             "ready"
         }
+    }
+
+    fn approval_status_label(&self) -> &'static str {
+        if self.overlay_state.pending_approval.is_some() {
+            "pending"
+        } else if self.overlay_state.auto_approve_session {
+            "auto"
+        } else {
+            "none"
+        }
+    }
+
+    fn status_line(&self) -> String {
+        format!(
+            "mode:{} approval:{} history:{} repo:{}",
+            self.mode_status_label(),
+            self.approval_status_label(),
+            self.history_state.lines.len(),
+            self.repo_label
+        )
     }
 
     fn overlay_active(&self) -> bool {
@@ -250,6 +272,23 @@ fn resolve_history_line_cap() -> usize {
         .unwrap_or(DEFAULT_MAX_HISTORY_LINES)
 }
 
+fn resolve_repo_label() -> String {
+    std::env::var("AISTAR_REPO_LABEL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .and_then(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or_else(|| "workspace".to_string())
+}
+
 fn resolve_tick_interval_ms(env_key: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> u64 {
     std::env::var(env_key)
         .ok()
@@ -261,7 +300,7 @@ fn resolve_tick_interval_ms(env_key: &str, default_ms: u64, min_ms: u64, max_ms:
 fn render_state_hash(mode: &TuiMode, input_state: &InputState) -> u64 {
     let mut hasher = DefaultHasher::new();
 
-    mode.status().hash(&mut hasher);
+    mode.status_line().hash(&mut hasher);
     mode.history_state.lines.hash(&mut hasher);
     mode.history_state.turn_in_progress.hash(&mut hasher);
     mode.history_state.active_assistant_index.hash(&mut hasher);
@@ -764,10 +803,11 @@ fn draw_tui_frame(frame: &mut Frame<'_>, mode: &TuiMode, input_state: &InputStat
     let input_rows =
         input_visual_rows(&input_state.buffer, frame.area().width as usize).clamp(1, 6) as u16;
     let panes = split_three_pane_layout(frame.area(), input_rows);
+    let status_line = mode.status_line();
 
     for pass in render_pass_order(mode) {
         match pass {
-            RenderPass::Header => render_status_line(frame, panes.header, mode.status()),
+            RenderPass::Header => render_status_line(frame, panes.header, &status_line),
             RenderPass::History => render_messages(
                 frame,
                 panes.history,
@@ -1228,6 +1268,80 @@ mod tests {
             Instant::now(),
         );
         assert_eq!(guard.poll_timeout(), Duration::from_millis(120));
+    }
+
+    #[test]
+    fn header_stable_during_streaming() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+
+        let ready_status = mode.status_line();
+        assert!(
+            ready_status.contains("mode:ready"),
+            "ready state must publish mode token"
+        );
+        assert!(
+            ready_status.contains("approval:none"),
+            "ready state must publish approval token"
+        );
+        assert!(
+            ready_status.contains("history:0"),
+            "ready state must publish history count"
+        );
+        assert!(
+            ready_status.contains("repo:"),
+            "ready state must publish repo token"
+        );
+        assert_eq!(
+            render_pass_order(&mode).first(),
+            Some(&RenderPass::Header),
+            "header row must remain first in render order"
+        );
+
+        mode.on_user_input("hello".to_string(), &mut ctx);
+        mode.on_model_update(UiUpdate::StreamDelta("assistant".to_string()), &mut ctx);
+        let streaming_status = mode.status_line();
+        assert!(
+            streaming_status.contains("mode:streaming"),
+            "streaming state must publish mode token"
+        );
+        assert!(
+            streaming_status.contains("approval:none"),
+            "streaming state must preserve approval token"
+        );
+        assert!(
+            streaming_status.contains("history:2"),
+            "streaming state must keep compact history count"
+        );
+        assert_eq!(
+            render_pass_order(&mode).first(),
+            Some(&RenderPass::Header),
+            "header row must remain first while streaming"
+        );
+
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<bool>();
+        mode.on_model_update(
+            UiUpdate::ToolApprovalRequest(ToolApprovalRequest {
+                tool_name: "read_file".to_string(),
+                input_preview: "{}".to_string(),
+                response_tx,
+            }),
+            &mut ctx,
+        );
+        let overlay_status = mode.status_line();
+        assert!(
+            overlay_status.contains("mode:overlay"),
+            "overlay state must publish overlay mode token"
+        );
+        assert!(
+            overlay_status.contains("approval:pending"),
+            "overlay state must publish pending approval token"
+        );
+        assert_eq!(
+            render_pass_order(&mode).first(),
+            Some(&RenderPass::Header),
+            "header row must remain first under overlay"
+        );
     }
 
     #[test]
