@@ -29,6 +29,39 @@ See [`docs/dev/manifest-strategy.md`](docs/dev/manifest-strategy.md) for the ope
 
 ---
 
+## 🧾 Planning and Audit-Only Requests
+
+Planning-only and audit-only requests are strictly no-touch by default:
+no file create, edit, rename, move, or delete is allowed during a planning/audit-only pass.
+
+If the user later asks to implement changes in the same session, switch to edit mode only
+after explicit user confirmation.
+
+Use the same explicit-confirmation standard already required for runtime mode additions and
+naming-policy changes.
+
+---
+
+## 📚 Docs Deployment Standard (GitHub Pages + mdBook)
+
+Docs deployment changes must follow this baseline:
+
+1. GitHub Pages preflight:
+   - Repository Pages source is set to **GitHub Actions**.
+   - Repository and branch policy permit the docs workflow to run on the protected integration path
+     (normally `main` via pull request merge).
+2. Workflow permissions minimums:
+   - `pages: write`
+   - `id-token: write`
+3. Canonical docs structure requirements:
+   - `docs/book.toml`
+   - `docs/src/SUMMARY.md`
+
+Keep docs deployment guidance scoped to documentation publishing only.
+Do not mix runtime behavior changes into deployment-standard edits.
+
+---
+
 ## 📋 Task Naming Convention
 
 | Prefix | Type | Example |
