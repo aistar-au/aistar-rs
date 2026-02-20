@@ -28,12 +28,29 @@ struct PendingApproval {
 
 const DEFAULT_MAX_HISTORY_LINES: usize = 2000;
 const MAX_HISTORY_LINES_ENV: &str = "AISTAR_MAX_HISTORY_LINES";
+const SCROLL_PAGE_UP_CMD_PREFIX: &str = "__AISTAR_SCROLL_PAGE_UP__:";
+const SCROLL_PAGE_DOWN_CMD_PREFIX: &str = "__AISTAR_SCROLL_PAGE_DOWN__:";
+const SCROLL_HOME_CMD: &str = "__AISTAR_SCROLL_HOME__";
+const SCROLL_END_CMD: &str = "__AISTAR_SCROLL_END__";
 
-#[derive(Default)]
 struct HistoryState {
     lines: Vec<String>,
     turn_in_progress: bool,
     active_assistant_index: Option<usize>,
+    scroll_offset: usize,
+    auto_follow: bool,
+}
+
+impl Default for HistoryState {
+    fn default() -> Self {
+        Self {
+            lines: Vec::new(),
+            turn_in_progress: false,
+            active_assistant_index: None,
+            scroll_offset: 0,
+            auto_follow: true,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -118,6 +135,11 @@ impl TuiMode {
     fn push_history_line(&mut self, line: String) {
         self.history_state.lines.push(line);
         self.enforce_history_cap();
+        if self.history_state.auto_follow {
+            self.set_scroll_to_bottom();
+        } else {
+            self.clamp_scroll_offset();
+        }
     }
 
     fn enforce_history_cap(&mut self) {
@@ -132,6 +154,75 @@ impl TuiMode {
             .history_state
             .active_assistant_index
             .and_then(|idx| idx.checked_sub(excess));
+        self.history_state.scroll_offset = self.history_state.scroll_offset.saturating_sub(excess);
+        self.clamp_scroll_offset();
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        self.history_state.lines.len().saturating_sub(1)
+    }
+
+    fn set_scroll_to_bottom(&mut self) {
+        self.history_state.scroll_offset = self.max_scroll_offset();
+    }
+
+    fn clamp_scroll_offset(&mut self) {
+        let max = self.max_scroll_offset();
+        self.history_state.scroll_offset = self.history_state.scroll_offset.min(max);
+    }
+
+    fn apply_page_up(&mut self, page_step: usize) {
+        self.history_state.scroll_offset = self
+            .history_state
+            .scroll_offset
+            .saturating_sub(page_step.max(1));
+        self.history_state.auto_follow = false;
+    }
+
+    fn apply_page_down(&mut self, page_step: usize) {
+        let max = self.max_scroll_offset();
+        self.history_state.scroll_offset = self
+            .history_state
+            .scroll_offset
+            .saturating_add(page_step.max(1))
+            .min(max);
+        self.history_state.auto_follow = self.history_state.scroll_offset >= max;
+    }
+
+    fn apply_home(&mut self) {
+        self.history_state.scroll_offset = 0;
+        self.history_state.auto_follow = false;
+    }
+
+    fn apply_end(&mut self) {
+        self.set_scroll_to_bottom();
+        self.history_state.auto_follow = true;
+    }
+
+    fn handle_scrollback_command(&mut self, input: &str) -> bool {
+        if let Some(step_text) = input.strip_prefix(SCROLL_PAGE_UP_CMD_PREFIX) {
+            if let Ok(step) = step_text.parse::<usize>() {
+                self.apply_page_up(step);
+            }
+            return true;
+        }
+        if let Some(step_text) = input.strip_prefix(SCROLL_PAGE_DOWN_CMD_PREFIX) {
+            if let Ok(step) = step_text.parse::<usize>() {
+                self.apply_page_down(step);
+            }
+            return true;
+        }
+        match input {
+            SCROLL_HOME_CMD => {
+                self.apply_home();
+                true
+            }
+            SCROLL_END_CMD => {
+                self.apply_end();
+                true
+            }
+            _ => false,
+        }
     }
 }
 
@@ -153,6 +244,9 @@ impl RuntimeMode for TuiMode {
     fn on_user_input(&mut self, input: String, ctx: &mut RuntimeContext) {
         if self.overlay_active() {
             self.handle_approval_input(&input);
+            return;
+        }
+        if self.handle_scrollback_command(&input) {
             return;
         }
 
@@ -181,6 +275,9 @@ impl RuntimeMode for TuiMode {
                 };
                 if let Some(line) = self.history_state.lines.get_mut(idx) {
                     line.push_str(&text);
+                }
+                if self.history_state.auto_follow {
+                    self.set_scroll_to_bottom();
                 }
             }
             UiUpdate::StreamBlockStart { .. }
@@ -211,6 +308,11 @@ impl RuntimeMode for TuiMode {
                 self.resolve_pending_approval(false);
                 self.history_state.turn_in_progress = false;
                 self.history_state.active_assistant_index = None;
+                if self.history_state.auto_follow {
+                    self.set_scroll_to_bottom();
+                } else {
+                    self.clamp_scroll_offset();
+                }
             }
             UiUpdate::Error(msg) => {
                 self.resolve_pending_approval(false);
@@ -475,6 +577,38 @@ impl TuiFrontend {
             editor: InputEditor::new(),
         }
     }
+
+    fn current_history_viewport_rows(&self) -> usize {
+        let size = self.terminal.size().ok();
+        let Some(size) = size else {
+            return 1;
+        };
+        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+        let input_rows = input_visual_rows(&self.editor.input_state.buffer, area.width as usize)
+            .clamp(1, 6) as u16;
+        split_three_pane_layout(area, input_rows)
+            .history
+            .height
+            .max(1) as usize
+    }
+
+    fn scroll_command_for_event(&self, event: &Event) -> Option<String> {
+        let Event::Key(key) = event else {
+            return None;
+        };
+        let page_step = self.current_history_viewport_rows().max(1);
+        match key.code {
+            KeyCode::PageUp => Some(format!("{SCROLL_PAGE_UP_CMD_PREFIX}{page_step}")),
+            KeyCode::PageDown => Some(format!("{SCROLL_PAGE_DOWN_CMD_PREFIX}{page_step}")),
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(SCROLL_HOME_CMD.to_string())
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(SCROLL_END_CMD.to_string())
+            }
+            _ => None,
+        }
+    }
 }
 
 fn draw_tui_frame(frame: &mut Frame<'_>, mode: &TuiMode, input_state: &InputState) {
@@ -485,9 +619,12 @@ fn draw_tui_frame(frame: &mut Frame<'_>, mode: &TuiMode, input_state: &InputStat
     for pass in render_pass_order(mode) {
         match pass {
             RenderPass::Header => render_status_line(frame, panes.header, mode.status()),
-            RenderPass::History => {
-                render_messages(frame, panes.history, &mode.history_state.lines, 0)
-            }
+            RenderPass::History => render_messages(
+                frame,
+                panes.history,
+                &mode.history_state.lines,
+                mode.history_state.scroll_offset,
+            ),
             RenderPass::Input => {
                 render_input(frame, panes.input, &input_state.buffer, input_state.cursor)
             }
@@ -525,6 +662,9 @@ impl FrontendAdapter<TuiMode> for TuiFrontend {
     fn poll_user_input(&mut self, _mode: &TuiMode) -> Option<UserInputEvent> {
         if poll(Duration::from_millis(16)).unwrap_or(false) {
             if let Ok(event) = read() {
+                if let Some(command) = self.scroll_command_for_event(&event) {
+                    return Some(UserInputEvent::Text(command));
+                }
                 match self.editor.apply_event(event) {
                     InputAction::None => {}
                     InputAction::Submit(value) => return Some(UserInputEvent::Text(value)),
@@ -703,6 +843,54 @@ mod tests {
         assert_eq!(mode.history_line_cap, DEFAULT_MAX_HISTORY_LINES);
 
         std::env::remove_var(MAX_HISTORY_LINES_ENV);
+    }
+
+    #[test]
+    fn test_scrollback_retains_position_during_streaming() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+
+        mode.history_state.lines = (0..20).map(|i| format!("line-{i}")).collect();
+        mode.history_state.active_assistant_index = Some(10);
+        mode.history_state.scroll_offset = 5;
+        mode.history_state.auto_follow = false;
+
+        mode.on_model_update(UiUpdate::StreamDelta(" assistant".to_string()), &mut ctx);
+
+        assert_eq!(
+            mode.history_state.scroll_offset, 5,
+            "scrollback position must not be forced while auto-follow is disabled"
+        );
+    }
+
+    #[test]
+    fn test_scrollback_commands_update_scroll_state() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+
+        mode.history_state.lines = (0..100).map(|i| format!("line-{i}")).collect();
+        mode.history_state.scroll_offset = 80;
+        mode.history_state.auto_follow = true;
+
+        mode.on_user_input(format!("{SCROLL_PAGE_UP_CMD_PREFIX}10"), &mut ctx);
+        assert_eq!(mode.history_state.scroll_offset, 70);
+        assert!(!mode.history_state.auto_follow);
+
+        mode.on_user_input(format!("{SCROLL_PAGE_DOWN_CMD_PREFIX}200"), &mut ctx);
+        assert_eq!(mode.history_state.scroll_offset, 99);
+        assert!(mode.history_state.auto_follow);
+
+        mode.on_user_input(SCROLL_HOME_CMD.to_string(), &mut ctx);
+        assert_eq!(mode.history_state.scroll_offset, 0);
+        assert!(!mode.history_state.auto_follow);
+
+        mode.on_user_input(SCROLL_END_CMD.to_string(), &mut ctx);
+        assert_eq!(mode.history_state.scroll_offset, 99);
+        assert!(mode.history_state.auto_follow);
+        assert!(
+            !mode.history_state.turn_in_progress,
+            "scroll commands must not dispatch new turns"
+        );
     }
 
     #[test]
