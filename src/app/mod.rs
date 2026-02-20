@@ -42,6 +42,7 @@ const MIN_CURSOR_TICK_MS: u64 = 100;
 const MAX_CURSOR_TICK_MS: u64 = 2000;
 const MIN_STATUS_TICK_MS: u64 = 50;
 const MAX_STATUS_TICK_MS: u64 = 500;
+const MAX_INPUT_PANE_ROWS: usize = 6;
 
 struct HistoryState {
     lines: Vec<String>,
@@ -295,6 +296,10 @@ fn resolve_tick_interval_ms(env_key: &str, default_ms: u64, min_ms: u64, max_ms:
         .and_then(|value| value.trim().parse::<u64>().ok())
         .map(|value| value.clamp(min_ms, max_ms))
         .unwrap_or(default_ms)
+}
+
+fn input_rows_for_buffer(input: &str, width: usize) -> u16 {
+    input_visual_rows(input, width).clamp(1, MAX_INPUT_PANE_ROWS) as u16
 }
 
 fn render_state_hash(mode: &TuiMode, input_state: &InputState) -> u64 {
@@ -745,8 +750,8 @@ impl TuiFrontend {
             return 1;
         };
         let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-        let input_rows = input_visual_rows(&self.editor.input_state.buffer, area.width as usize)
-            .clamp(1, 6) as u16;
+        let input_rows =
+            input_rows_for_buffer(&self.editor.input_state.buffer, area.width as usize);
         split_three_pane_layout(area, input_rows)
             .history
             .height
@@ -800,8 +805,7 @@ fn overlay_event_to_user_input(event: Event) -> Option<UserInputEvent> {
 }
 
 fn draw_tui_frame(frame: &mut Frame<'_>, mode: &TuiMode, input_state: &InputState) {
-    let input_rows =
-        input_visual_rows(&input_state.buffer, frame.area().width as usize).clamp(1, 6) as u16;
+    let input_rows = input_rows_for_buffer(&input_state.buffer, frame.area().width as usize);
     let panes = split_three_pane_layout(frame.area(), input_rows);
     let status_line = mode.status_line();
 
@@ -1343,6 +1347,84 @@ mod tests {
             render_pass_order(&mode).first(),
             Some(&RenderPass::Header),
             "header row must remain first under overlay"
+        );
+    }
+
+    #[test]
+    fn multiline_submit_outside_overlay_only() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+        let mut editor = InputEditor::new();
+
+        editor.apply_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        editor.apply_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        let submitted = match editor.apply_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+            InputAction::Submit(value) => value,
+            _ => panic!("enter outside overlay must submit multiline buffer"),
+        };
+        assert_eq!(submitted, "a\nb\nc");
+
+        mode.on_user_input(submitted.clone(), &mut ctx);
+        assert!(
+            mode.history_state.turn_in_progress,
+            "outside overlay, enter must submit and start a turn"
+        );
+        assert!(
+            mode.history_state
+                .lines
+                .iter()
+                .any(|line| line == "> a\nb\nc"),
+            "submitted multiline prompt should be recorded in history"
+        );
+
+        mode.history_state.turn_in_progress = false;
+        mode.history_state.active_assistant_index = None;
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<bool>();
+        mode.overlay_state.pending_approval = Some(PendingApproval {
+            tool_name: "read_file".to_string(),
+            input_preview: "{}".to_string(),
+            response_tx,
+        });
+
+        let overlay_enter = overlay_event_to_user_input(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(
+            overlay_enter.is_none(),
+            "enter in overlay keymap must not route to submit"
+        );
+
+        mode.on_user_input("overlay\nattempt".to_string(), &mut ctx);
+        assert!(
+            mode.overlay_active(),
+            "overlay should remain active after non-decision input"
+        );
+        assert!(
+            !mode
+                .history_state
+                .lines
+                .iter()
+                .any(|line| line == "> overlay\nattempt"),
+            "overlay-focused input must not submit as a user prompt"
+        );
+    }
+
+    #[test]
+    fn input_pane_expands_then_clamps_to_max_rows() {
+        assert_eq!(input_rows_for_buffer("", 80), 1);
+
+        let multiline = (0..12)
+            .map(|idx| format!("line-{idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            input_rows_for_buffer(&multiline, 80),
+            MAX_INPUT_PANE_ROWS as u16
         );
     }
 

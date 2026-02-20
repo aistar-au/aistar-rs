@@ -40,7 +40,7 @@ pub fn render_input(frame: &mut Frame<'_>, area: Rect, input: &str, cursor_byte:
     let lines = wrap_input_lines(input, input_width);
     let (cursor_row, cursor_col) = cursor_row_col(input, cursor_byte, input_width);
     let visible_rows = inner.height as usize;
-    let window_start = cursor_row.saturating_add(1).saturating_sub(visible_rows);
+    let window_start = input_window_start(cursor_row, visible_rows);
 
     let mut rendered = Vec::with_capacity(visible_rows);
     for offset in 0..visible_rows {
@@ -70,6 +70,12 @@ pub fn render_input(frame: &mut Frame<'_>, area: Rect, input: &str, cursor_byte:
         .saturating_add(2 + cursor_col as u16)
         .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
     frame.set_cursor_position((cursor_x, cursor_y));
+}
+
+fn input_window_start(cursor_row: usize, visible_rows: usize) -> usize {
+    cursor_row
+        .saturating_add(1)
+        .saturating_sub(visible_rows.max(1))
 }
 
 pub fn render_messages(frame: &mut Frame<'_>, area: Rect, messages: &[String], scroll: usize) {
@@ -285,5 +291,13 @@ mod tests {
                 .draw(|frame| render_overlay_modal(frame, modal))
                 .expect("renderer should support every modal class");
         }
+    }
+
+    #[test]
+    fn input_window_start_scrolls_once_cursor_exceeds_visible_rows() {
+        assert_eq!(input_window_start(0, 4), 0);
+        assert_eq!(input_window_start(3, 4), 0);
+        assert_eq!(input_window_start(4, 4), 1);
+        assert_eq!(input_window_start(7, 4), 4);
     }
 }
