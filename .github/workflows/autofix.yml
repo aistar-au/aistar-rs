@@ -25,7 +25,7 @@ jobs:
         with:
           version: "0.8.1"
 
-      # --- 1. Detect CR-only line endings (before conversion) ---
+      # --- 1. Detect CR-only line endings (BEFORE conversion) ---
       - name: Debug newline bytes (Cargo.toml)
         run: |
           set -euo pipefail
@@ -34,14 +34,23 @@ jobs:
           p = Path("Cargo.toml")
           if p.exists():
               data = p.read_bytes()
-              print(f"Cargo.toml: \\n = {data.count(b'\\n')}, \\r = {data.count(b'\\r')}")
+              nl = data.count(b'\n')
+              cr = data.count(b'\r')
+              print(f"Cargo.toml: \\n = {nl}, \\r = {cr}")
+              if cr > 0 and nl == 0:
+                  print("⚠️  DETECTED: Classic Mac CR-only line endings!")
+              elif cr > 0 and nl > 0:
+                  print("⚠️  DETECTED: Mixed line endings (CRLF or partial CR)")
+              else:
+                  print("✅ Line endings look normal (LF only)")
               print("First 120 bytes (hex):", data[:120].hex())
           else:
-              print("⚠️ Cargo.toml not found")
+              print("⚠️  Cargo.toml not found")
           PY
 
       # --- 2. Convert CR-only → LF (tracked files only) ---
       - name: Convert CR-only line endings to LF (tracked files)
+        id: convert
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -58,22 +67,37 @@ jobs:
           for b in files:
               p = Path(b.decode("utf-8", "surrogateescape"))
               if p.name in ALWAYS or p.suffix.lower() in TEXT_EXT:
-                  data = p.read_bytes()
-                  if b"\r" in data and b"\n" not in data:
-                      p.write_bytes(data.replace(b"\r", b"\n"))
-                      changed.append(str(p))
+                  try:
+                      data = p.read_bytes()
+                      # Detect classic Mac: has \r but zero \n
+                      if b"\r" in data and b"\n" not in data:
+                          p.write_bytes(data.replace(b"\r", b"\n"))
+                          changed.append(str(p))
+                  except Exception as e:
+                      print(f"⚠️  Skipping {p}: {e}")
 
-          print(f"Converted {len(changed)} file(s) from CR-only to LF")
-          for x in changed[:200]:
+          print(f"\n✅ Converted {len(changed)} file(s) from CR-only to LF")
+          for x in sorted(changed)[:200]:
               print(" -", x)
+          
+          # Output count for next steps
+          with open(Path.home() / "convert_count.txt", "w") as f:
+              f.write(str(len(changed)))
           PY
 
       # --- 3. Verify .gitattributes exists (fail fast if missing) ---
       - name: Verify .gitattributes exists and enforces LF
         run: |
           set -euo pipefail
-          test -f .gitattributes
-          grep -q 'text=auto eol=lf' .gitattributes
+          if [ ! -f .gitattributes ]; then
+            echo "::error::.gitattributes not found! Please create it with: * text=auto eol=lf"
+            exit 1
+          fi
+          if ! grep -q 'text=auto eol=lf' .gitattributes; then
+            echo "::error::.gitattributes exists but doesn't enforce LF. Please add: * text=auto eol=lf"
+            exit 1
+          fi
+          echo "✅ .gitattributes verified"
 
       # --- 4. Apply git renormalization (CRLF↔LF) ---
       - name: Normalize line endings (LF)
@@ -94,15 +118,16 @@ jobs:
       - name: Stage changes
         run: git add -A
 
-      # --- 7. Final verification ---
+      # --- 7. Final verification (FAIL if no changes) ---
       - name: Final debug summary
+        id: verify
         run: |
           set -euo pipefail
           echo "=== Final Git status ==="
           git status --porcelain
           echo ""
-          echo "=== Final Git diff stat ==="
-          git diff --stat --cached
+          echo "=== Final Git diff stat (cached) ==="
+          git diff --cached --stat
           echo ""
           echo "=== Cargo.toml newline check (post-fix) ==="
           python3 - <<'PY'
@@ -112,6 +137,24 @@ jobs:
               data = p.read_bytes()
               print(f"Cargo.toml: \\n = {data.count(b'\\n')}, \\r = {data.count(b'\\r')}")
           PY
+          
+          # Count changed files
+          CHANGED=$(git status -s | wc -l)
+          CONVERT_COUNT=$(cat $HOME/convert_count.txt 2>/dev/null || echo "0")
+          
+          echo ""
+          echo "=== Summary ==="
+          echo "Files converted (CR→LF): $CONVERT_COUNT"
+          echo "Total git changes: $CHANGED"
+          
+          if [ "$CHANGED" -eq 0 ]; then
+            echo "::warning::No changes detected after conversion + formatting"
+            echo "This means either:"
+            echo "  1. Files don't have CR-only line endings"
+            echo "  2. Files are already clean"
+            echo "  3. Conversion step didn't run"
+            # Don't fail here, let create-pull-request handle it gracefully
+          fi
 
       # --- 8. Create PR if changes exist ---
       - name: Create PR
@@ -128,4 +171,6 @@ jobs:
             This resolves GitHub Raw showing files as "1 line".
           branch: autofix/formatting
           delete-branch: true
+          add-paths: |
+            *
 
