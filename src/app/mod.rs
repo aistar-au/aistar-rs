@@ -26,6 +26,9 @@ struct PendingApproval {
     response_tx: tokio::sync::oneshot::Sender<bool>,
 }
 
+const DEFAULT_MAX_HISTORY_LINES: usize = 2000;
+const MAX_HISTORY_LINES_ENV: &str = "AISTAR_MAX_HISTORY_LINES";
+
 #[derive(Default)]
 struct HistoryState {
     lines: Vec<String>,
@@ -52,6 +55,7 @@ struct InputState {
 pub struct TuiMode {
     history_state: HistoryState,
     overlay_state: OverlayState,
+    history_line_cap: usize,
 }
 
 impl TuiMode {
@@ -59,6 +63,7 @@ impl TuiMode {
         Self {
             history_state: HistoryState::default(),
             overlay_state: OverlayState::default(),
+            history_line_cap: resolve_history_line_cap(),
         }
     }
 
@@ -92,31 +97,50 @@ impl TuiMode {
             .unwrap_or_else(|| "unknown".to_string());
         match normalized.as_str() {
             "1" | "y" | "yes" => {
-                self.history_state
-                    .lines
-                    .push(format!("[tool approval accepted once: {context}]"));
+                self.push_history_line(format!("[tool approval accepted once: {context}]"));
                 self.resolve_pending_approval(true);
             }
             "2" | "a" | "always" => {
                 self.overlay_state.auto_approve_session = true;
-                self.history_state
-                    .lines
-                    .push(format!("[tool approval enabled for session: {context}]"));
+                self.push_history_line(format!("[tool approval enabled for session: {context}]"));
                 self.resolve_pending_approval(true);
             }
             "3" | "n" | "no" | "esc" => {
-                self.history_state
-                    .lines
-                    .push(format!("[tool approval denied: {context}]"));
+                self.push_history_line(format!("[tool approval denied: {context}]"));
                 self.resolve_pending_approval(false);
             }
             _ => {
-                self.history_state
-                    .lines
-                    .push("[invalid selection, expected 1/2/3]".to_string());
+                self.push_history_line("[invalid selection, expected 1/2/3]".to_string());
             }
         }
     }
+
+    fn push_history_line(&mut self, line: String) {
+        self.history_state.lines.push(line);
+        self.enforce_history_cap();
+    }
+
+    fn enforce_history_cap(&mut self) {
+        let cap = self.history_line_cap;
+        if self.history_state.lines.len() <= cap {
+            return;
+        }
+
+        let excess = self.history_state.lines.len() - cap;
+        self.history_state.lines.drain(..excess);
+        self.history_state.active_assistant_index = self
+            .history_state
+            .active_assistant_index
+            .and_then(|idx| idx.checked_sub(excess));
+    }
+}
+
+fn resolve_history_line_cap() -> usize {
+    std::env::var(MAX_HISTORY_LINES_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|cap| *cap > 0)
+        .unwrap_or(DEFAULT_MAX_HISTORY_LINES)
 }
 
 impl Default for TuiMode {
@@ -136,8 +160,8 @@ impl RuntimeMode for TuiMode {
             return;
         }
 
-        self.history_state.lines.push(format!("> {input}"));
-        self.history_state.lines.push(String::new());
+        self.push_history_line(format!("> {input}"));
+        self.push_history_line(String::new());
         self.history_state.active_assistant_index = Some(self.history_state.lines.len() - 1);
         self.history_state.turn_in_progress = true;
         ctx.start_turn(input);
@@ -149,7 +173,7 @@ impl RuntimeMode for TuiMode {
                 let idx = match self.history_state.active_assistant_index {
                     Some(idx) => idx,
                     None => {
-                        self.history_state.lines.push(String::new());
+                        self.push_history_line(String::new());
                         let idx = self.history_state.lines.len() - 1;
                         self.history_state.active_assistant_index = Some(idx);
                         idx
@@ -169,14 +193,12 @@ impl RuntimeMode for TuiMode {
             }) => {
                 if self.overlay_state.auto_approve_session {
                     let _ = response_tx.send(true);
-                    self.history_state
-                        .lines
-                        .push(format!("[auto-approved tool: {tool_name} session]"));
+                    self.push_history_line(format!("[auto-approved tool: {tool_name} session]"));
                     return;
                 }
 
                 self.resolve_pending_approval(false);
-                self.history_state.lines.push(format!(
+                self.push_history_line(format!(
                     "[tool approval requested: {tool_name}] {input_preview}"
                 ));
                 self.overlay_state.pending_approval = Some(PendingApproval {
@@ -192,7 +214,7 @@ impl RuntimeMode for TuiMode {
             }
             UiUpdate::Error(msg) => {
                 self.resolve_pending_approval(false);
-                self.history_state.lines.push(format!("[error] {msg}"));
+                self.push_history_line(format!("[error] {msg}"));
                 self.history_state.turn_in_progress = false;
                 self.history_state.active_assistant_index = None;
             }
@@ -205,9 +227,7 @@ impl RuntimeMode for TuiMode {
             self.resolve_pending_approval(false);
             self.history_state.turn_in_progress = false;
             self.history_state.active_assistant_index = None;
-            self.history_state
-                .lines
-                .push("[turn cancelled]".to_string());
+            self.push_history_line("[turn cancelled]".to_string());
         }
     }
 
@@ -628,6 +648,61 @@ mod tests {
 
         assert_eq!(mode.history_state.lines[0], "> hello");
         assert_eq!(mode.history_state.lines[1], "assistant");
+    }
+
+    #[test]
+    fn test_transcript_does_not_exceed_cap_after_n_turns() {
+        let _env_lock = crate::test_support::ENV_LOCK.blocking_lock();
+        std::env::set_var(MAX_HISTORY_LINES_ENV, "10");
+
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+        assert_eq!(mode.history_line_cap, 10);
+
+        for i in 0..20 {
+            mode.on_user_input(format!("user-{i}"), &mut ctx);
+            assert!(
+                mode.history_state.lines.len() <= 10,
+                "history must be capped after on_user_input"
+            );
+            if let Some(idx) = mode.history_state.active_assistant_index {
+                assert!(
+                    idx < mode.history_state.lines.len(),
+                    "active assistant index must remain valid after cap enforcement"
+                );
+            }
+
+            mode.on_model_update(UiUpdate::StreamDelta(format!("assistant-{i}")), &mut ctx);
+            assert!(
+                mode.history_state.lines.len() <= 10,
+                "history must be capped after stream update"
+            );
+            if let Some(idx) = mode.history_state.active_assistant_index {
+                assert!(
+                    idx < mode.history_state.lines.len(),
+                    "active assistant index must remain valid during streaming"
+                );
+            }
+
+            mode.on_model_update(UiUpdate::TurnComplete, &mut ctx);
+            assert!(
+                mode.history_state.lines.len() <= 10,
+                "history must stay capped after turn completion"
+            );
+        }
+
+        std::env::remove_var(MAX_HISTORY_LINES_ENV);
+    }
+
+    #[test]
+    fn test_history_cap_env_invalid_uses_default() {
+        let _env_lock = crate::test_support::ENV_LOCK.blocking_lock();
+        std::env::set_var(MAX_HISTORY_LINES_ENV, "invalid-cap");
+
+        let mode = TuiMode::new();
+        assert_eq!(mode.history_line_cap, DEFAULT_MAX_HISTORY_LINES);
+
+        std::env::remove_var(MAX_HISTORY_LINES_ENV);
     }
 
     #[test]
