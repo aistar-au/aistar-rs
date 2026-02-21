@@ -10,6 +10,11 @@ PATTERNS=(
     "update_rx\.try_recv"
 )
 
+RUNTIME_POLICY_PATTERNS=(
+    "fn strip_tagged_tool_markup"
+    "fn request_likely_requires_tools"
+)
+
 FAIL=0
 for pattern in "${PATTERNS[@]}"; do
     if grep -rn "$pattern" src/app/; then
@@ -18,9 +23,17 @@ for pattern in "${PATTERNS[@]}"; do
     fi
 done
 
+for pattern in "${RUNTIME_POLICY_PATTERNS[@]}"; do
+    if grep -rn "$pattern" src/app/ src/state/; then
+        echo "FAIL: runtime policy duplicate '$pattern' found outside src/runtime/policy.rs"
+        FAIL=1
+    fi
+done
+
 if [ $FAIL -eq 1 ]; then
     echo ""
     echo "Alternate routing is forbidden. See ADR-007."
+    echo "Runtime policy centralization is required. See ADR-014."
     exit 1
 fi
 

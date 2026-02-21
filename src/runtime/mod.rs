@@ -3,6 +3,7 @@ pub mod event;
 pub mod frontend;
 pub mod r#loop;
 pub mod mode;
+pub mod policy;
 pub mod update;
 
 pub use update::UiUpdate;

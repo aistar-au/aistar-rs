@@ -20,6 +20,11 @@ can be set explicitly, or omitted and inferred from the URL.
 | OpenAI Chat Completions | `openai` | `.../v1/chat/completions` |
 
 Remote endpoints require `ANTHROPIC_API_KEY`. Localhost endpoints do not.
+Structured tool protocol defaults:
+
+- Remote endpoints: enabled (`AISTAR_STRUCTURED_TOOL_PROTOCOL=on`)
+- Local endpoints: disabled by default (text-protocol fallback)
+- Override explicitly with `AISTAR_STRUCTURED_TOOL_PROTOCOL=on|off`
 
 Anthropic example:
 

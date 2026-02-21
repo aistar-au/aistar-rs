@@ -1,6 +1,7 @@
 use super::stream_block::{StreamBlock, ToolStatus};
 use crate::api::{stream::StreamParser, ApiClient};
 use crate::edit_diff::DEFAULT_EDIT_DIFF_CONTEXT_LINES;
+use crate::runtime::policy::{default_runtime_policy, RuntimeCorePolicy};
 use crate::tool_preview::{
     format_read_file_snapshot_message, preview_tool_input, read_file_path, ReadFileSnapshotCache,
     ReadFileSummaryMessageStyle, ToolPreviewStyle,
@@ -118,10 +119,14 @@ impl ConversationManager {
         stream_delta_tx: Option<&mpsc::UnboundedSender<ConversationStreamUpdate>>,
     ) -> Result<String> {
         self.current_turn_blocks.clear();
+        let original_user_input = content.clone();
         self.push_user_message(content);
 
+        let core_policy = default_runtime_policy();
         let use_structured_tool_protocol = self.client.supports_structured_tool_protocol();
         let use_structured_blocks = structured_blocks_enabled();
+        let requires_tool_evidence =
+            core_policy.request_requires_tool_evidence(&original_user_input);
         let limits = resolve_history_limits(self.client.is_local_endpoint());
         let tool_timeout = resolve_tool_timeout(self.client.is_local_endpoint());
         let max_tool_rounds = resolve_max_tool_rounds(self.client.is_local_endpoint());
@@ -129,6 +134,8 @@ impl ConversationManager {
         let stream_local_tool_events = stream_local_tool_events_enabled();
         let require_tool_approval = tool_approval_enabled(self.client.is_local_endpoint());
         let mut rounds = 0usize;
+        let mut forced_tool_retry_used = false;
+        let mut saw_any_tool_round = false;
         let mut previous_round_signature: Option<Vec<String>> = None;
         let mut repeated_read_only_rounds = 0usize;
         loop {
@@ -344,12 +351,15 @@ impl ConversationManager {
             }
 
             let mut assistant_text_for_history = assistant_text.clone();
+            let mut used_tagged_fallback = false;
             let mut tool_use_blocks: Vec<ContentBlock> =
                 tool_use_blocks.into_iter().flatten().collect();
             if tool_use_blocks.is_empty() && self.client.is_local_endpoint() {
                 let tagged_calls = parse_tagged_tool_calls(&assistant_text);
                 if !tagged_calls.is_empty() {
-                    assistant_text_for_history = strip_tagged_tool_markup(&assistant_text);
+                    used_tagged_fallback = true;
+                    assistant_text_for_history =
+                        core_policy.sanitize_assistant_text(&assistant_text);
                     tool_use_blocks = tagged_calls
                         .into_iter()
                         .enumerate()
@@ -379,7 +389,23 @@ impl ConversationManager {
                 }
             }
 
+            let use_structured_round = use_structured_tool_protocol && !used_tagged_fallback;
+
+            let assistant_history_source = if !tool_use_blocks.is_empty() && !use_structured_round {
+                let rendered_tool_calls = render_tool_calls_for_text_protocol(&tool_use_blocks);
+                if assistant_text_for_history.is_empty() {
+                    rendered_tool_calls
+                } else {
+                    format!("{assistant_text_for_history}\n{rendered_tool_calls}")
+                }
+            } else if assistant_text_for_history.is_empty() && !tool_use_blocks.is_empty() {
+                render_tool_calls_for_text_protocol(&tool_use_blocks)
+            } else {
+                assistant_text_for_history.clone()
+            };
+
             if !tool_use_blocks.is_empty() {
+                saw_any_tool_round = true;
                 let current_signature = tool_round_signature(&tool_use_blocks);
                 if is_read_only_tool_round(&tool_use_blocks)
                     && previous_round_signature
@@ -402,16 +428,9 @@ impl ConversationManager {
                 repeated_read_only_rounds = 0;
             }
 
-            let assistant_history_text =
-                if assistant_text_for_history.is_empty() && !tool_use_blocks.is_empty() {
-                    render_tool_calls_for_text_protocol(&tool_use_blocks)
-                } else {
-                    assistant_text_for_history.clone()
-                };
+            let assistant_history_text = assistant_history_source;
             let assistant_history_text =
                 truncate_for_history(&assistant_history_text, limits.max_assistant_history_chars);
-
-            let use_structured_round = use_structured_tool_protocol;
 
             if use_structured_round {
                 let mut assistant_content_blocks = Vec::new();
@@ -437,6 +456,19 @@ impl ConversationManager {
             }
 
             if tool_use_blocks.is_empty() {
+                if self.client.is_local_endpoint()
+                    && requires_tool_evidence
+                    && !saw_any_tool_round
+                    && !forced_tool_retry_used
+                    && rounds < max_tool_rounds
+                {
+                    forced_tool_retry_used = true;
+                    self.api_messages.push(ApiMessage {
+                        role: "user".to_string(),
+                        content: Content::Text(core_policy.tool_retry_instruction().to_string()),
+                    });
+                    continue;
+                }
                 if use_structured_blocks {
                     self.promote_thinking_blocks_to_final_text(
                         &deferred_text_block_indices,
@@ -1269,48 +1301,6 @@ fn parse_tagged_parameters(body: &str) -> serde_json::Map<String, serde_json::Va
     input
 }
 
-fn strip_tagged_tool_markup(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0usize;
-
-    while let Some(rel_start) = text[cursor..].find("<function=") {
-        let start = cursor + rel_start;
-        out.push_str(&text[cursor..start]);
-
-        let Some(rel_end) = text[start..].find("</function>") else {
-            return strip_incomplete_tool_tag_suffix(&out);
-        };
-        cursor = start + rel_end + "</function>".len();
-    }
-
-    out.push_str(&text[cursor..]);
-    strip_incomplete_tool_tag_suffix(&out)
-}
-
-fn strip_incomplete_tool_tag_suffix(text: &str) -> String {
-    let mut out = text.to_string();
-    let Some(last_open) = out.rfind('<') else {
-        return out;
-    };
-
-    let suffix = &out[last_open..];
-    let suffix_lower = suffix.to_ascii_lowercase();
-    let looks_like_incomplete_tool_tag = "<function=".starts_with(&suffix_lower)
-        || "<function".starts_with(&suffix_lower)
-        || "</function>".starts_with(&suffix_lower)
-        || "</function".starts_with(&suffix_lower)
-        || "<parameter=".starts_with(&suffix_lower)
-        || "<parameter".starts_with(&suffix_lower)
-        || "</parameter>".starts_with(&suffix_lower)
-        || "</parameter".starts_with(&suffix_lower);
-
-    if looks_like_incomplete_tool_tag {
-        out.truncate(last_open);
-    }
-
-    out
-}
-
 fn render_tool_calls_for_text_protocol(blocks: &[ContentBlock]) -> String {
     let mut out = String::new();
     for block in blocks {
@@ -1731,18 +1721,6 @@ cal.js
     }
 
     #[test]
-    fn test_strip_tagged_tool_markup_removes_function_blocks() {
-        let text = "Checking.\n<function=git_status>\n</function>\nDone.";
-        assert_eq!(strip_tagged_tool_markup(text), "Checking.\n\nDone.");
-    }
-
-    #[test]
-    fn test_strip_tagged_tool_markup_drops_incomplete_suffix() {
-        let text = "Checking.\n<function=git_status";
-        assert_eq!(strip_tagged_tool_markup(text), "Checking.\n");
-    }
-
-    #[test]
     fn test_truncate_for_history() {
         let text = "abcdefghij";
         let truncated = truncate_for_history(text, 40);
@@ -1877,13 +1855,23 @@ data: {"type":"message_stop"}"#.to_string(),
                     return false;
                 }
                 match &message.content {
-                    Content::Blocks(blocks) => blocks.iter().any(
-                        |block| matches!(block, ContentBlock::ToolUse { name, .. } if name == "read_file"),
-                    ),
+                    Content::Text(text) => {
+                        text.contains("I'll read it.") && text.contains("<function=read_file>")
+                    }
                     _ => false,
                 }
             }),
-            "expected fallback parser to convert tagged tool syntax into ToolUse blocks"
+            "expected fallback parser to persist text-protocol tool call markup"
+        );
+        assert!(
+            messages.iter().any(|message| {
+                message.role == "user"
+                    && matches!(
+                        &message.content,
+                        Content::Text(text) if text.contains("tool_result read_file")
+                    )
+            }),
+            "expected fallback parser to execute read_file and append tool_result text"
         );
 
         Ok(())
@@ -2060,12 +2048,156 @@ data: {"type":"message_stop"}"#.to_string(),
                 }
                 match &message.content {
                     Content::Text(text) => {
-                        text.contains("I will read it.") && !text.contains("<function=")
+                        text.contains("I will read it.") && text.contains("<function=read_file>")
                     }
                     _ => false,
                 }
             }),
-            "expected fallback to sanitize tagged tool syntax from assistant history text"
+            "expected fallback to preserve rendered text-protocol tool call in history"
+        );
+        assert!(
+            messages.iter().any(|message| {
+                message.role == "user"
+                    && matches!(
+                        &message.content,
+                        Content::Text(text) if text.contains("tool_result read_file")
+                    )
+            }),
+            "expected text protocol tool_result payload to be appended for the next round"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_endpoint_retries_once_when_tool_evidence_required() -> Result<()> {
+        let first_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_retry_01","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":2}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me check that."}}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+        let second_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_retry_02","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":2}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<function=read_file>\n<parameter=path>\nCargo.toml\n</parameter>\n</function>"}}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+        let third_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_retry_03","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":2}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Tool-backed summary complete."}}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+
+        let mock_api_client =
+            ApiClient::new_mock(Arc::new(crate::api::mock_client::MockApiClient::new(vec![
+                first_response_sse,
+                second_response_sse,
+                third_response_sse,
+            ])));
+        let mut mock_tool_responses = HashMap::new();
+        mock_tool_responses.insert(
+            "Cargo.toml".to_string(),
+            "[package]\nname = \"aistar\"".to_string(),
+        );
+        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+
+        let final_text = manager
+            .send_message("how many files are in this tree".to_string(), None)
+            .await?;
+        assert!(final_text.contains("Tool-backed summary complete."));
+
+        let correction_count = manager
+            .api_messages
+            .iter()
+            .filter(|message| {
+                message.role == "user"
+                    && matches!(
+                        &message.content,
+                        Content::Text(text) if text.contains("did not execute any tool call")
+                    )
+            })
+            .count();
+        assert_eq!(
+            correction_count, 1,
+            "expected exactly one corrective tool-use retry message"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_local_endpoint_retry_only_once_when_model_stays_toolless() -> Result<()> {
+        let first_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_retry_once_01","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":2}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me inspect that."}}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+        let second_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_retry_once_02","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":2}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Still no tool call."}}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+
+        let mock_api_client =
+            ApiClient::new_mock(Arc::new(crate::api::mock_client::MockApiClient::new(vec![
+                first_response_sse,
+                second_response_sse,
+            ])));
+        let mut manager = ConversationManager::new_mock(mock_api_client, HashMap::new());
+
+        let final_text = manager
+            .send_message("show me the file count".to_string(), None)
+            .await?;
+        assert!(final_text.contains("Still no tool call."));
+
+        let correction_count = manager
+            .api_messages
+            .iter()
+            .filter(|message| {
+                message.role == "user"
+                    && matches!(
+                        &message.content,
+                        Content::Text(text) if text.contains("did not execute any tool call")
+                    )
+            })
+            .count();
+        assert_eq!(
+            correction_count, 1,
+            "retry message should only be inserted once"
         );
 
         Ok(())

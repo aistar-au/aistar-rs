@@ -14,6 +14,18 @@ use std::sync::Arc;
 
 pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 const DEFAULT_DEBUG_PAYLOAD_LOG_PATH: &str = "/tmp/aistar-debug-payload.log";
+const SYSTEM_PROMPT: &str = "You are a coding assistant.\n\
+Use tools for all filesystem facts and changes.\n\
+When a user asks for repository facts, command output, file content, or code edits, call tools instead of guessing.\n\
+After each tool_result, reassess the task and either call the next needed tool or provide the final answer.\n\
+Repeat this loop until the task is complete; do not stop early after a single tool result when more evidence is required.\n\
+Never claim a file was read/written/renamed/searched unless the corresponding tool call succeeded.\n\
+Do not narrate intended actions without executing the tool call.\n\
+Prefer search_files for targeted string matches and avoid full-file reads unless required.\n\
+Use list_files/search_files/read_file before saying a file is missing or present.\n\
+For edit_file, use a focused old_str snippet around the target change and avoid whole-file replacements; if an entire file rewrite is needed, use write_file instead.\n\
+Always send non-empty string paths for file tools.\n\
+Avoid redundant loops: do not repeat identical read/search tool calls without new evidence.";
 
 #[cfg(test)]
 pub trait MockStreamProducer: Send + Sync {
@@ -45,10 +57,7 @@ impl ApiClient {
             .ok()
             .and_then(parse_protocol)
             .unwrap_or_else(|| infer_api_protocol(&config.api_url));
-        let structured_tool_protocol = std::env::var("AISTAR_STRUCTURED_TOOL_PROTOCOL")
-            .ok()
-            .and_then(parse_bool_flag)
-            .unwrap_or(true);
+        let structured_tool_protocol = resolve_structured_tool_protocol(&config.api_url);
 
         Ok(Self {
             http: reqwest::Client::new(),
@@ -109,7 +118,6 @@ impl ApiClient {
             }
         }
 
-        let system_prompt = "You are a coding assistant. Use tools for all filesystem facts and changes. Never claim a file was read/written/renamed/searched unless the corresponding tool call succeeded. Prefer search_files for targeted string matches and avoid full-file reads unless required. Use list_files/search_files/read_file before saying a file is missing or present. For edit_file, use a focused old_str snippet around the target change and avoid whole-file replacements; if an entire file rewrite is needed, use write_file instead. Always send non-empty string paths for file tools. Avoid redundant read/search loops: do not call the same tool repeatedly without new evidence.";
         let request_url = self.request_url();
         let max_tokens = resolve_max_tokens(&self.api_url);
         let payload = match self.api_protocol {
@@ -118,7 +126,7 @@ impl ApiClient {
                     "model": self.model,
                     "max_tokens": max_tokens,
                     "stream": true,
-                    "system": system_prompt,
+                    "system": SYSTEM_PROMPT,
                     "messages": messages,
                 });
                 if self.structured_tool_protocol {
@@ -135,7 +143,7 @@ impl ApiClient {
                     "model": self.model,
                     "max_tokens": max_tokens,
                     "stream": true,
-                    "messages": openai_messages(messages, system_prompt),
+                    "messages": openai_messages(messages, SYSTEM_PROMPT),
                 });
                 if self.structured_tool_protocol {
                     let payload_object = payload
@@ -188,6 +196,19 @@ impl ApiClient {
             }
         }
     }
+}
+
+fn resolve_structured_tool_protocol(api_url: &str) -> bool {
+    if let Some(value) = std::env::var("AISTAR_STRUCTURED_TOOL_PROTOCOL")
+        .ok()
+        .and_then(parse_bool_flag)
+    {
+        return value;
+    }
+
+    // Local endpoints default to text-protocol fallback because many local servers
+    // do not implement structured tool call blocks consistently.
+    !is_local_endpoint_url(api_url)
 }
 
 fn resolve_max_tokens(api_url: &str) -> u32 {
@@ -647,6 +668,38 @@ mod tests {
         let client = ApiClient::new(&config).expect("client should build");
         assert!(!client.supports_structured_tool_protocol());
         std::env::remove_var("AISTAR_STRUCTURED_TOOL_PROTOCOL");
+    }
+
+    #[test]
+    fn test_structured_tool_protocol_defaults_off_for_local_endpoint() {
+        let _env_lock = crate::test_support::ENV_LOCK.blocking_lock();
+        std::env::remove_var("AISTAR_STRUCTURED_TOOL_PROTOCOL");
+        let config = crate::config::Config {
+            api_key: None,
+            model: "local/llama.cpp".to_string(),
+            api_url: "http://localhost:8000/v1/messages".to_string(),
+            anthropic_version: "2023-06-01".to_string(),
+            working_dir: std::path::PathBuf::from("."),
+        };
+
+        let client = ApiClient::new(&config).expect("client should build");
+        assert!(!client.supports_structured_tool_protocol());
+    }
+
+    #[test]
+    fn test_structured_tool_protocol_defaults_on_for_remote_endpoint() {
+        let _env_lock = crate::test_support::ENV_LOCK.blocking_lock();
+        std::env::remove_var("AISTAR_STRUCTURED_TOOL_PROTOCOL");
+        let config = crate::config::Config {
+            api_key: Some("test-key".to_string()),
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            api_url: "https://api.anthropic.com/v1/messages".to_string(),
+            anthropic_version: "2023-06-01".to_string(),
+            working_dir: std::path::PathBuf::from("."),
+        };
+
+        let client = ApiClient::new(&config).expect("client should build");
+        assert!(client.supports_structured_tool_protocol());
     }
 
     #[test]

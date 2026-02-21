@@ -37,6 +37,8 @@ A task manifest may reference an ADR. An ADR may spawn one or more tasks. They a
 | [ADR-010](ADR-010-runtime-core-tui-viewport-and-transcript.md) | Runtime-core TUI viewport and transcript model | Accepted |
 | [ADR-011](ADR-011-runtime-core-tui-render-loop-and-lifecycle.md) | Runtime-core TUI render loop and lifecycle | Accepted |
 | [ADR-012](ADR-012-runtime-core-tui-deployment-gate.md) | Runtime-core TUI deployment gate | Accepted |
+| [ADR-014](ADR-014-runtime-core-policy-dedup-and-enforcement.md) | Runtime-core policy deduplication and enforcement | Accepted |
+| [ADR-015](ADR-015-local-endpoint-text-protocol-default.md) | Local endpoint text-protocol default for tool loop reliability | Accepted |
 
 ## Template
 
