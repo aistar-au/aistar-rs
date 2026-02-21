@@ -9,7 +9,7 @@
 
 ## Context
 
-`vexcoder` is itself a coding agent, and its own development is conducted with heavy use of LLM coding agents (Aider, Claude, Gemini, etc.). This creates a unique meta-problem:
+`vexcoder` is itself a coding agent, and its own development is conducted with heavy use of CLI-based LLM coding agents. This creates a unique meta-problem:
 
 **How do you maintain engineering discipline — no regressions, clear ownership, auditable changes — when the implementor is a stateless language model that forgets everything between sessions?**
 

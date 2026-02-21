@@ -38,7 +38,7 @@ As the Lead Architect, your role is to manage the "State Machine" of the reposit
 | Phase | Responsibility | Goal |
 | :--- | :--- | :--- |
 | **Drafting** | Write the `.md` task and the failing Rust test. | Establish "Red" state. |
-| **Dispatch** | Feed the task to the agent (Aider/Gemini). | Trigger "Green" attempt. |
+| **Dispatch** | Feed the task to your selected CLI coding agent. | Trigger "Green" attempt. |
 | **Verification** | Run `cargo test --all` and review the diff. | Ensure no regressions. |
 | **Promotion** | Move task to `TASKS/completed/` and merge. | Update repository history. |
 

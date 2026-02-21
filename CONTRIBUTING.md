@@ -119,8 +119,10 @@ vexcoder/
 │   │   ├── ADR-001-tdm-agentic-manifest-strategy.md
 │   │   ├── ADR-002-lexical-path-normalization.md
 │   │   ├── ADR-003-dual-protocol-api-auto-detection.md
-│   │   ├── ADR-004-runtime-seam-headless-first.md
-│   │   └── ADR-005-cfg-test-mock-injection.md
+│   │   ├── ADR-005-cfg-test-mock-injection.md
+│   │   └── superseded/             # Historical ADRs kept for traceability
+│   │       ├── ADR-004-runtime-seam-headless-first.md
+│   │       └── ADR-017-append-terminal-single-session.md
 │   └── dev/
 │       └── manifest-strategy.md   # TDM operational guide (how)
 ├── TASKS/                         # Work orders (what + anchor)

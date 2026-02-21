@@ -28,7 +28,6 @@ A task manifest may reference an ADR. An ADR may spawn one or more tasks. They a
 | [ADR-001](ADR-001-tdm-agentic-manifest-strategy.md) | Test-Driven Manifest (TDM) as primary agentic development methodology | Accepted |
 | [ADR-002](ADR-002-lexical-path-normalization.md) | Lexical path normalization over `fs::canonicalize()` in tool executor | Accepted |
 | [ADR-003](ADR-003-dual-protocol-api-auto-detection.md) | Dual-protocol API client with URL-inferred protocol selection | Accepted |
-| [ADR-004](ADR-004-runtime-seam-headless-first.md) | Runtime seam refactor — headless-first architecture (REF track) | Superseded operationally by ADR-006 and ADR-007 |
 | [ADR-005](ADR-005-cfg-test-mock-injection.md) | `#[cfg(test)]` mock injection field on production `ApiClient` struct | Accepted |
 | [ADR-006](ADR-006-runtime-mode-contracts.md) | Runtime mode contracts — `RuntimeMode`, `RuntimeContext`, `RuntimeEvent`, `FrontendAdapter` | Accepted |
 | [ADR-007](ADR-007-runtime-canonical-dispatch-no-alt-routing.md) | Runtime-core canonical dispatch — no alternate routing | Accepted |
@@ -40,7 +39,16 @@ A task manifest may reference an ADR. An ADR may spawn one or more tasks. They a
 | [ADR-014](ADR-014-runtime-core-policy-dedup-and-enforcement.md) | Runtime-core policy deduplication and enforcement | Accepted |
 | [ADR-015](ADR-015-local-endpoint-text-protocol-default.md) | Local endpoint text-protocol default for tool loop reliability | Accepted |
 | [ADR-016](ADR-016-local-tool-loop-guard-and-correction.md) | Local tool-loop guard and correction path | Accepted |
-| [ADR-017](ADR-017-append-terminal-single-session.md) | Append-terminal single session runtime | Accepted |
+| [ADR-018](ADR-018-managed-tui-scrollback-streaming-cell-overlays.md) | Managed TUI scrollback, streaming cell, overlays | Proposed |
+
+## Superseded ADRs
+
+Superseded records are retained under `docs/adr/superseded/`.
+
+| ADR | Title | Status |
+| :--- | :--- | :--- |
+| [ADR-004](superseded/ADR-004-runtime-seam-headless-first.md) | Runtime seam refactor — headless-first architecture (REF track) | Superseded operationally by ADR-006 and ADR-007 |
+| [ADR-017](superseded/ADR-017-append-terminal-single-session.md) | Append-terminal single session runtime | Superseded by ADR-018 |
 
 ## Template
 

@@ -12,7 +12,7 @@
 
 `vexcoder` targets two distinct user groups:
 
-1. **Remote API users** who connect to `api.anthropic.com` using the Anthropic Messages API (`/v1/messages`). This group uses Claude models and expects streaming SSE with `content_block_start` / `content_block_delta` events and native `tool_use` blocks.
+1. **Remote API users** who connect to `api.anthropic.com` using the Anthropic Messages API (`/v1/messages`). This group uses hosted models and expects streaming SSE with `content_block_start` / `content_block_delta` events and native `tool_use` blocks.
 
 2. **Local model users** who run llama.cpp server, Ollama, or LM Studio locally. These tools expose an OpenAI-compatible `/v1/chat/completions` endpoint. This group cannot use the Anthropic protocol but wants the same agentic loop with local models.
 
@@ -80,7 +80,7 @@ Would lose native Anthropic features (extended thinking, `betas` headers, native
 **Harder:**
 - The stream parser is more complex: it attempts two parse strategies per SSE event. Parse errors from the Anthropic path are silently retried as OpenAI before being logged.
 - Testing requires mock streams for both protocols (see `src/api/mock_client.rs`).
-- Adding a third protocol (e.g., Google Gemini) requires extending the enum, the inference logic, the URL adapter, and the stream parser. The abstraction is extensible but not free.
+- Adding a third protocol requires extending the enum, the inference logic, the URL adapter, and the stream parser. The abstraction is extensible but not free.
 
 **Constraints imposed on future work:**
 - Protocol selection must remain automatic (URL-inferred) for the common case. Do not make `VEX_API_PROTOCOL` required.

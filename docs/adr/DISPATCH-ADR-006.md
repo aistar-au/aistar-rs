@@ -1,6 +1,6 @@
 # Agent Dispatch: ADR-006 Runtime Contracts (REF-02 → REF-06)
 
-Paste one of the blocks below into your CLI agent (Aider, Claude Code, etc.)
+Paste one of the blocks below into your CLI coding agent
 to dispatch a task. Always start with REF-02. Do not dispatch a task until
 its predecessor anchor test is green.
 
@@ -81,7 +81,7 @@ TASKS/              (read-only reference)
 CONTRIBUTING.md     (read-only reference)
 ```
 
-In Aider:
+In a CLI agent session:
 ```bash
 # REF-02
 aider src/runtime.rs \
@@ -105,24 +105,24 @@ aider src/runtime/context.rs src/app/mod.rs tests/ref_04_start_turn.rs \
   --read src/runtime/mod.rs
 ```
 
-In Claude Code:
+Alternative wrapper style:
 ```bash
 # REF-02
-claude "Refer to CONTRIBUTING.md. I am assigning you Task REF-02. \
+agent-cli "Refer to CONTRIBUTING.md. I am assigning you Task REF-02. \
 Read TASKS/REF-02-runtime-mode-contract.md and \
 docs/adr/ADR-006-runtime-mode-contracts.md. \
 Create the stub types as specified. \
 Anchor: cargo test test_ref_02_runtime_types_compile"
 
 # REF-03
-claude "Refer to CONTRIBUTING.md. I am assigning you Task REF-03. \
+agent-cli "Refer to CONTRIBUTING.md. I am assigning you Task REF-03. \
 Read TASKS/REF-03-tui-mode-implement.md and \
 docs/adr/ADR-006-runtime-mode-contracts.md. \
 Implement TuiMode in src/app/mod.rs as specified. \
 Anchor: cargo test test_ref_03_tui_mode_overlay_blocks_input"
 
 # REF-04
-claude "Refer to CONTRIBUTING.md. I am assigning you Task REF-04. \
+agent-cli "Refer to CONTRIBUTING.md. I am assigning you Task REF-04. \
 Read TASKS/REF-04-runtime-context-start-turn.md and \
 docs/adr/ADR-006-runtime-mode-contracts.md. \
 Implement RuntimeContext::start_turn and ::cancel_turn. \
