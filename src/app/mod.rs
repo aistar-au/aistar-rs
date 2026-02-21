@@ -28,6 +28,12 @@ struct PendingApproval {
     response_tx: tokio::sync::oneshot::Sender<bool>,
 }
 
+struct PendingPatchApproval {
+    patch_preview: String,
+    scroll_offset: usize,
+    response_tx: Option<tokio::sync::oneshot::Sender<bool>>,
+}
+
 const DEFAULT_MAX_HISTORY_LINES: usize = 2000;
 const MAX_HISTORY_LINES_ENV: &str = "AISTAR_MAX_HISTORY_LINES";
 const SCROLL_PAGE_UP_CMD_PREFIX: &str = "__AISTAR_SCROLL_PAGE_UP__:";
@@ -43,6 +49,12 @@ const MAX_CURSOR_TICK_MS: u64 = 2000;
 const MIN_STATUS_TICK_MS: u64 = 50;
 const MAX_STATUS_TICK_MS: u64 = 500;
 const MAX_INPUT_PANE_ROWS: usize = 6;
+const OVERLAY_SCROLL_UP_CMD: &str = "__AISTAR_OVERLAY_SCROLL_UP__";
+const OVERLAY_SCROLL_DOWN_CMD: &str = "__AISTAR_OVERLAY_SCROLL_DOWN__";
+const OVERLAY_SCROLL_PAGE_UP_CMD_PREFIX: &str = "__AISTAR_OVERLAY_SCROLL_PAGE_UP__:";
+const OVERLAY_SCROLL_PAGE_DOWN_CMD_PREFIX: &str = "__AISTAR_OVERLAY_SCROLL_PAGE_DOWN__:";
+const OVERLAY_SCROLL_HOME_CMD: &str = "__AISTAR_OVERLAY_SCROLL_HOME__";
+const OVERLAY_SCROLL_END_CMD: &str = "__AISTAR_OVERLAY_SCROLL_END__";
 
 struct HistoryState {
     lines: Vec<String>,
@@ -67,6 +79,7 @@ impl Default for HistoryState {
 #[derive(Default)]
 struct OverlayState {
     pending_approval: Option<PendingApproval>,
+    pending_patch_approval: Option<PendingPatchApproval>,
     auto_approve_session: bool,
 }
 
@@ -103,7 +116,7 @@ impl TuiMode {
     }
 
     fn mode_status_label(&self) -> &'static str {
-        if self.overlay_state.pending_approval.is_some() {
+        if self.overlay_active() {
             "overlay"
         } else if self.pending_quit {
             "quit-arm"
@@ -115,7 +128,7 @@ impl TuiMode {
     }
 
     fn approval_status_label(&self) -> &'static str {
-        if self.overlay_state.pending_approval.is_some() {
+        if self.overlay_active() {
             "pending"
         } else if self.overlay_state.auto_approve_session {
             "auto"
@@ -136,6 +149,11 @@ impl TuiMode {
 
     fn overlay_active(&self) -> bool {
         self.overlay_state.pending_approval.is_some()
+            || self.overlay_state.pending_patch_approval.is_some()
+    }
+
+    fn patch_overlay_active(&self) -> bool {
+        self.overlay_state.pending_patch_approval.is_some()
     }
 
     fn resolve_pending_approval(&mut self, approved: bool) {
@@ -169,6 +187,70 @@ impl TuiMode {
             _ => {
                 self.push_history_line("[invalid selection, expected 1/2/3]".to_string());
             }
+        }
+    }
+
+    fn resolve_pending_patch_approval(&mut self, approved: bool) {
+        if let Some(mut pending) = self.overlay_state.pending_patch_approval.take() {
+            if let Some(tx) = pending.response_tx.take() {
+                let _ = tx.send(approved);
+            }
+            let decision = if approved { "accepted" } else { "denied" };
+            self.push_history_line(format!("[patch approval {decision}]"));
+        }
+    }
+
+    fn apply_patch_overlay_scroll_delta(&mut self, delta: isize) {
+        if let Some(pending) = self.overlay_state.pending_patch_approval.as_mut() {
+            let max = pending.patch_preview.lines().count().saturating_sub(1);
+            let current = pending.scroll_offset as isize;
+            pending.scroll_offset = current.saturating_add(delta).clamp(0, max as isize) as usize;
+        }
+    }
+
+    fn handle_patch_overlay_input(&mut self, input: &str) {
+        if self.overlay_state.pending_patch_approval.is_none() {
+            return;
+        }
+
+        if input == OVERLAY_SCROLL_UP_CMD {
+            self.apply_patch_overlay_scroll_delta(-1);
+            return;
+        }
+        if input == OVERLAY_SCROLL_DOWN_CMD {
+            self.apply_patch_overlay_scroll_delta(1);
+            return;
+        }
+        if let Some(step) = input.strip_prefix(OVERLAY_SCROLL_PAGE_UP_CMD_PREFIX) {
+            if let Ok(step) = step.parse::<isize>() {
+                self.apply_patch_overlay_scroll_delta(-step.max(1));
+            }
+            return;
+        }
+        if let Some(step) = input.strip_prefix(OVERLAY_SCROLL_PAGE_DOWN_CMD_PREFIX) {
+            if let Ok(step) = step.parse::<isize>() {
+                self.apply_patch_overlay_scroll_delta(step.max(1));
+            }
+            return;
+        }
+        if input == OVERLAY_SCROLL_HOME_CMD {
+            if let Some(pending) = self.overlay_state.pending_patch_approval.as_mut() {
+                pending.scroll_offset = 0;
+            }
+            return;
+        }
+        if input == OVERLAY_SCROLL_END_CMD {
+            if let Some(pending) = self.overlay_state.pending_patch_approval.as_mut() {
+                pending.scroll_offset = pending.patch_preview.lines().count().saturating_sub(1);
+            }
+            return;
+        }
+
+        let normalized = input.trim().to_lowercase();
+        match normalized.as_str() {
+            "1" | "y" | "yes" => self.resolve_pending_patch_approval(true),
+            "3" | "n" | "no" | "esc" => self.resolve_pending_patch_approval(false),
+            _ => {}
         }
     }
 
@@ -324,6 +406,14 @@ fn render_state_hash(mode: &TuiMode, input_state: &InputState) -> u64 {
         }
         None => false.hash(&mut hasher),
     }
+    match mode.overlay_state.pending_patch_approval.as_ref() {
+        Some(pending) => {
+            true.hash(&mut hasher);
+            pending.patch_preview.hash(&mut hasher);
+            pending.scroll_offset.hash(&mut hasher);
+        }
+        None => false.hash(&mut hasher),
+    }
 
     input_state.buffer.hash(&mut hasher);
     input_state.cursor.hash(&mut hasher);
@@ -395,7 +485,11 @@ impl Default for TuiMode {
 impl RuntimeMode for TuiMode {
     fn on_user_input(&mut self, input: String, ctx: &mut RuntimeContext) {
         if self.overlay_active() {
-            self.handle_approval_input(&input);
+            if self.patch_overlay_active() {
+                self.handle_patch_overlay_input(&input);
+            } else {
+                self.handle_approval_input(&input);
+            }
             return;
         }
         if self.handle_scrollback_command(&input) {
@@ -450,6 +544,7 @@ impl RuntimeMode for TuiMode {
                 }
 
                 self.resolve_pending_approval(false);
+                self.resolve_pending_patch_approval(false);
                 self.push_history_line(format!(
                     "[tool approval requested: {tool_name}] {input_preview}"
                 ));
@@ -461,6 +556,7 @@ impl RuntimeMode for TuiMode {
             }
             UiUpdate::TurnComplete => {
                 self.resolve_pending_approval(false);
+                self.resolve_pending_patch_approval(false);
                 self.history_state.turn_in_progress = false;
                 self.history_state.active_assistant_index = None;
                 if self.history_state.auto_follow {
@@ -471,6 +567,7 @@ impl RuntimeMode for TuiMode {
             }
             UiUpdate::Error(msg) => {
                 self.resolve_pending_approval(false);
+                self.resolve_pending_patch_approval(false);
                 self.push_history_line(format!("[error] {msg}"));
                 self.history_state.turn_in_progress = false;
                 self.history_state.active_assistant_index = None;
@@ -482,6 +579,7 @@ impl RuntimeMode for TuiMode {
         if self.history_state.turn_in_progress {
             ctx.cancel_turn();
             self.resolve_pending_approval(false);
+            self.resolve_pending_patch_approval(false);
             self.history_state.turn_in_progress = false;
             self.history_state.active_assistant_index = None;
             self.push_history_line("[turn cancelled]".to_string());
@@ -790,6 +888,29 @@ impl TuiFrontend {
             _ => None,
         }
     }
+
+    fn current_overlay_viewport_rows(&self) -> usize {
+        self.terminal
+            .size()
+            .map(|size| size.height.saturating_sub(8).max(1) as usize)
+            .unwrap_or(1)
+    }
+
+    fn overlay_scroll_command_for_event(&self, event: &Event) -> Option<String> {
+        let Event::Key(key) = event else {
+            return None;
+        };
+        let page_step = self.current_overlay_viewport_rows().max(1);
+        match key.code {
+            KeyCode::Up => Some(OVERLAY_SCROLL_UP_CMD.to_string()),
+            KeyCode::Down => Some(OVERLAY_SCROLL_DOWN_CMD.to_string()),
+            KeyCode::PageUp => Some(format!("{OVERLAY_SCROLL_PAGE_UP_CMD_PREFIX}{page_step}")),
+            KeyCode::PageDown => Some(format!("{OVERLAY_SCROLL_PAGE_DOWN_CMD_PREFIX}{page_step}")),
+            KeyCode::Home => Some(OVERLAY_SCROLL_HOME_CMD.to_string()),
+            KeyCode::End => Some(OVERLAY_SCROLL_END_CMD.to_string()),
+            _ => None,
+        }
+    }
 }
 
 fn overlay_event_to_user_input(event: Event) -> Option<UserInputEvent> {
@@ -846,6 +967,15 @@ fn draw_tui_frame(frame: &mut Frame<'_>, mode: &TuiMode, input_state: &InputStat
                             auto_approve_enabled: mode.overlay_state.auto_approve_session,
                         },
                     );
+                } else if let Some(pending) = mode.overlay_state.pending_patch_approval.as_ref() {
+                    render_overlay_modal(
+                        frame,
+                        OverlayModal::PatchApprove {
+                            patch_preview: &pending.patch_preview,
+                            scroll_offset: pending.scroll_offset,
+                            viewport_rows: frame.area().height.saturating_sub(9).max(1) as usize,
+                        },
+                    );
                 }
             }
         }
@@ -881,6 +1011,11 @@ impl FrontendAdapter<TuiMode> for TuiFrontend {
         if poll(self.render_guard.poll_timeout()).unwrap_or(false) {
             if let Ok(event) = read() {
                 if mode.overlay_active() {
+                    if mode.patch_overlay_active() {
+                        if let Some(command) = self.overlay_scroll_command_for_event(&event) {
+                            return Some(UserInputEvent::Text(command));
+                        }
+                    }
                     return overlay_event_to_user_input(event);
                 }
                 if let Some(command) = self.scroll_command_for_event(&event) {
@@ -1482,6 +1617,86 @@ mod tests {
         assert_eq!(
             editor.input_state.buffer, "draft",
             "prompt draft must restore after overlay transition"
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_overlay_scrolls() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+
+        let patch_preview = vec![
+            "@@ -1,3 +1,4".to_string(),
+            " context line".to_string(),
+            "-old value".to_string(),
+            "+new value".to_string(),
+            " context tail".to_string(),
+            "-removed again".to_string(),
+            "+added again".to_string(),
+        ]
+        .join("\n");
+
+        let (approve_tx, approve_rx) = tokio::sync::oneshot::channel::<bool>();
+        mode.overlay_state.pending_patch_approval = Some(PendingPatchApproval {
+            patch_preview: patch_preview.clone(),
+            scroll_offset: 0,
+            response_tx: Some(approve_tx),
+        });
+
+        mode.on_user_input(OVERLAY_SCROLL_DOWN_CMD.to_string(), &mut ctx);
+        assert_eq!(
+            mode.overlay_state
+                .pending_patch_approval
+                .as_ref()
+                .map(|p| p.scroll_offset),
+            Some(1),
+            "down must advance diff overlay scroll"
+        );
+
+        mode.on_user_input(format!("{OVERLAY_SCROLL_PAGE_DOWN_CMD_PREFIX}3"), &mut ctx);
+        assert_eq!(
+            mode.overlay_state
+                .pending_patch_approval
+                .as_ref()
+                .map(|p| p.scroll_offset),
+            Some(4),
+            "page down must advance by requested step"
+        );
+
+        mode.on_user_input(OVERLAY_SCROLL_END_CMD.to_string(), &mut ctx);
+        assert_eq!(
+            mode.overlay_state
+                .pending_patch_approval
+                .as_ref()
+                .map(|p| p.scroll_offset),
+            Some(patch_preview.lines().count().saturating_sub(1)),
+            "end must jump to last diff line"
+        );
+
+        mode.on_user_input("1".to_string(), &mut ctx);
+        assert!(
+            approve_rx.await.expect("patch approval should resolve"),
+            "approve binding must resolve true"
+        );
+        assert!(
+            !mode.patch_overlay_active(),
+            "overlay must clear after approve decision"
+        );
+
+        let (deny_tx, deny_rx) = tokio::sync::oneshot::channel::<bool>();
+        mode.overlay_state.pending_patch_approval = Some(PendingPatchApproval {
+            patch_preview,
+            scroll_offset: 2,
+            response_tx: Some(deny_tx),
+        });
+        mode.on_user_input("n".to_string(), &mut ctx);
+        assert!(
+            !deny_rx.await.expect("patch denial should resolve"),
+            "deny binding must resolve false"
+        );
+        assert!(
+            !mode.patch_overlay_active(),
+            "overlay must clear after deny decision"
         );
     }
 

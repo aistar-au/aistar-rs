@@ -15,6 +15,8 @@ pub enum OverlayModal<'a> {
     },
     PatchApprove {
         patch_preview: &'a str,
+        scroll_offset: usize,
+        viewport_rows: usize,
     },
     ToolPermission {
         tool_name: &'a str,
@@ -167,17 +169,40 @@ fn modal_content(
             ],
             "y/1 confirm   n/3/esc cancel",
         ),
-        OverlayModal::PatchApprove { patch_preview } => (
-            "Patch Approve",
-            Color::Blue,
-            vec![
-                Line::from("Review and approve patch application."),
-                Line::from(""),
-                Line::styled("Patch", Style::default().add_modifier(Modifier::BOLD)),
-                Line::from(patch_preview.to_string()),
-            ],
-            "y/1 approve   n/3/esc reject",
-        ),
+        OverlayModal::PatchApprove {
+            patch_preview,
+            scroll_offset,
+            viewport_rows,
+        } => {
+            let lines: Vec<&str> = patch_preview.lines().collect();
+            let start = scroll_offset.min(lines.len().saturating_sub(1));
+            let visible = viewport_rows.max(1);
+            let end = (start + visible).min(lines.len());
+
+            let mut body = Vec::new();
+            body.push(Line::from("Review and approve patch application."));
+            body.push(Line::from(format!(
+                "showing {}-{} of {}",
+                if lines.is_empty() { 0 } else { start + 1 },
+                end,
+                lines.len()
+            )));
+            body.push(Line::from(""));
+            body.push(Line::styled(
+                "Patch",
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            for line in lines.iter().skip(start).take(visible) {
+                body.push(styled_diff_line(line));
+            }
+
+            (
+                "Patch Approve",
+                Color::Blue,
+                body,
+                "y/1 approve   n/3/esc reject   up/down/pgup/pgdn/home/end scroll",
+            )
+        }
         OverlayModal::ToolPermission {
             tool_name,
             input_preview,
@@ -224,6 +249,18 @@ fn modal_content(
             ],
             "enter/esc dismiss",
         ),
+    }
+}
+
+fn styled_diff_line(line: &str) -> Line<'static> {
+    if line.starts_with('+') && !line.starts_with("+++") {
+        Line::styled(line.to_string(), Style::default().fg(Color::Green))
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        Line::styled(line.to_string(), Style::default().fg(Color::Red))
+    } else if line.starts_with("@@") {
+        Line::styled(line.to_string(), Style::default().fg(Color::Cyan))
+    } else {
+        Line::styled(line.to_string(), Style::default().fg(Color::Gray))
     }
 }
 
@@ -275,6 +312,8 @@ mod tests {
             },
             OverlayModal::PatchApprove {
                 patch_preview: "diff --git a/src/app/mod.rs b/src/app/mod.rs",
+                scroll_offset: 0,
+                viewport_rows: 8,
             },
             OverlayModal::ToolPermission {
                 tool_name: "exec_command",
@@ -299,5 +338,18 @@ mod tests {
         assert_eq!(input_window_start(3, 4), 0);
         assert_eq!(input_window_start(4, 4), 1);
         assert_eq!(input_window_start(7, 4), 4);
+    }
+
+    #[test]
+    fn diff_line_semantics_are_styled_by_prefix() {
+        let add = styled_diff_line("+added");
+        let del = styled_diff_line("-removed");
+        let hunk = styled_diff_line("@@ -1 +1 @@");
+        let ctx = styled_diff_line(" context");
+
+        assert_eq!(add.style.fg, Some(Color::Green));
+        assert_eq!(del.style.fg, Some(Color::Red));
+        assert_eq!(hunk.style.fg, Some(Color::Cyan));
+        assert_eq!(ctx.style.fg, Some(Color::Gray));
     }
 }
