@@ -1625,7 +1625,7 @@ mod tests {
         let mut mode = TuiMode::new();
         let mut ctx = setup_ctx();
 
-        let patch_preview = vec![
+        let patch_preview = [
             "@@ -1,3 +1,4".to_string(),
             " context line".to_string(),
             "-old value".to_string(),
