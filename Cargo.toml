@@ -1,7 +1,12 @@
 [package]
-name = "aistar"
+name = "aistralis"
 version = "0.1.0"
 edition = "2021"
+autobins = false
+
+[[bin]]
+name = "aistralis"
+path = "src/bin/aistralis.rs"
 
 [dependencies]
 anyhow = "1"

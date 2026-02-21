@@ -4,15 +4,12 @@ use crate::ui::input_metrics::{
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Text},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
 pub enum OverlayModal<'a> {
-    CommandConfirm {
-        command_preview: &'a str,
-    },
     PatchApprove {
         patch_preview: &'a str,
         scroll_offset: usize,
@@ -22,9 +19,6 @@ pub enum OverlayModal<'a> {
         tool_name: &'a str,
         input_preview: &'a str,
         auto_approve_enabled: bool,
-    },
-    Error {
-        message: &'a str,
     },
 }
 
@@ -86,17 +80,69 @@ pub fn render_messages(frame: &mut Frame<'_>, area: Rect, messages: &[String], s
     }
     let inner = area;
 
-    let body = if messages.is_empty() {
-        String::new()
-    } else {
-        messages.join("\n")
-    };
+    let rows = expand_history_rows(messages);
+    let line_number_width = rows.len().max(1).to_string().len();
+    let body: Vec<Line<'static>> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| format_history_row(index + 1, line_number_width, row))
+        .collect();
 
-    let paragraph = Paragraph::new(body)
-        .style(Style::default().fg(Color::White))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll as u16, 0));
+    let paragraph =
+        Paragraph::new(Text::from(body)).scroll((scroll.min(u16::MAX as usize) as u16, 0));
     frame.render_widget(paragraph, inner);
+}
+
+pub fn history_visual_line_count(messages: &[String]) -> usize {
+    if messages.is_empty() {
+        return 0;
+    }
+    messages
+        .iter()
+        .map(|message| message.split('\n').count().max(1))
+        .sum()
+}
+
+fn expand_history_rows(messages: &[String]) -> Vec<String> {
+    if messages.is_empty() {
+        return Vec::new();
+    }
+
+    let mut rows = Vec::new();
+    for message in messages {
+        if message.is_empty() {
+            rows.push(String::new());
+            continue;
+        }
+        rows.extend(message.split('\n').map(ToOwned::to_owned));
+    }
+    rows
+}
+
+fn format_history_row(line_number: usize, line_number_width: usize, row: &str) -> Line<'static> {
+    let line_prefix = format!("{line_number:>line_number_width$} | ");
+    let style = history_row_style(row);
+    Line::from(vec![
+        Span::styled(
+            line_prefix,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ),
+        Span::styled(row.to_string(), style),
+    ])
+}
+
+fn history_row_style(row: &str) -> Style {
+    if row.starts_with('+') && !row.starts_with("+++") {
+        Style::default().fg(Color::Green)
+    } else if row.starts_with('-') && !row.starts_with("---") {
+        Style::default().fg(Color::Red)
+    } else if row.starts_with("@@") || row.starts_with("diff --git") || row.starts_with("index ") {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::White)
+    }
 }
 
 pub fn render_status_line(frame: &mut Frame<'_>, area: Rect, status: &str) {
@@ -158,17 +204,6 @@ fn modal_content(
     modal: OverlayModal<'_>,
 ) -> (&'static str, Color, Vec<Line<'static>>, &'static str) {
     match modal {
-        OverlayModal::CommandConfirm { command_preview } => (
-            "Command Confirm",
-            Color::Cyan,
-            vec![
-                Line::from("Confirm command execution."),
-                Line::from(""),
-                Line::styled("Command", Style::default().add_modifier(Modifier::BOLD)),
-                Line::from(command_preview.to_string()),
-            ],
-            "y/1 confirm   n/3/esc cancel",
-        ),
         OverlayModal::PatchApprove {
             patch_preview,
             scroll_offset,
@@ -236,19 +271,6 @@ fn modal_content(
                 "y/1 approve once   a/2 approve session   n/3/esc deny",
             )
         }
-        OverlayModal::Error { message } => (
-            "Error",
-            Color::Red,
-            vec![
-                Line::styled(
-                    "An error occurred.",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Line::from(""),
-                Line::from(message.to_string()),
-            ],
-            "enter/esc dismiss",
-        ),
     }
 }
 
@@ -307,9 +329,6 @@ mod tests {
         let mut terminal = Terminal::new(backend).expect("test terminal");
 
         let modals = [
-            OverlayModal::CommandConfirm {
-                command_preview: "cargo test --all-targets",
-            },
             OverlayModal::PatchApprove {
                 patch_preview: "diff --git a/src/app/mod.rs b/src/app/mod.rs",
                 scroll_offset: 0,
@@ -319,9 +338,6 @@ mod tests {
                 tool_name: "exec_command",
                 input_preview: "echo hi",
                 auto_approve_enabled: false,
-            },
-            OverlayModal::Error {
-                message: "permission denied",
             },
         ];
 
@@ -351,5 +367,23 @@ mod tests {
         assert_eq!(del.style.fg, Some(Color::Red));
         assert_eq!(hunk.style.fg, Some(Color::Cyan));
         assert_eq!(ctx.style.fg, Some(Color::Gray));
+    }
+
+    #[test]
+    fn history_visual_line_count_tracks_embedded_newlines() {
+        let messages = vec![
+            "first".to_string(),
+            "line-a\nline-b".to_string(),
+            String::new(),
+        ];
+        assert_eq!(history_visual_line_count(&messages), 4);
+    }
+
+    #[test]
+    fn history_row_style_marks_diff_rows() {
+        assert_eq!(history_row_style("+add").fg, Some(Color::Green));
+        assert_eq!(history_row_style("-del").fg, Some(Color::Red));
+        assert_eq!(history_row_style("@@ -1 +1 @@").fg, Some(Color::Cyan));
+        assert_eq!(history_row_style("plain text").fg, Some(Color::White));
     }
 }

@@ -1,5 +1,5 @@
-use aistar::api::stream::StreamParser;
-use aistar::types::{ContentBlock, StreamEvent};
+use aistralis::api::stream::StreamParser;
+use aistralis::types::{ContentBlock, StreamEvent};
 
 #[test]
 fn test_fragmented_events() {

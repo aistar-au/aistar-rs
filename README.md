@@ -1,4 +1,4 @@
-# aistar-rs
+# aistralis
 
 
 Terminal-first coding assistant with streaming responses, tool execution, and ratatui UI.
@@ -11,10 +11,10 @@ cargo run
 
 ## API Endpoint Configuration
 
-Set `ANTHROPIC_API_URL` to the protocol-specific endpoint. `AISTAR_API_PROTOCOL`
+Set `ANTHROPIC_API_URL` to the protocol-specific endpoint. `AISTRALIS_API_PROTOCOL`
 can be set explicitly, or omitted and inferred from the URL.
 
-| Protocol | `AISTAR_API_PROTOCOL` | `ANTHROPIC_API_URL` endpoint |
+| Protocol | `AISTRALIS_API_PROTOCOL` | `ANTHROPIC_API_URL` endpoint |
 |---|---|---|
 | Anthropic Messages | `anthropic` | `.../v1/messages` |
 | OpenAI Chat Completions | `openai` | `.../v1/chat/completions` |
@@ -22,15 +22,15 @@ can be set explicitly, or omitted and inferred from the URL.
 Remote endpoints require `ANTHROPIC_API_KEY`. Localhost endpoints do not.
 Structured tool protocol defaults:
 
-- Remote endpoints: enabled (`AISTAR_STRUCTURED_TOOL_PROTOCOL=on`)
+- Remote endpoints: enabled (`AISTRALIS_STRUCTURED_TOOL_PROTOCOL=on`)
 - Local endpoints: disabled by default (text-protocol fallback)
-- Override explicitly with `AISTAR_STRUCTURED_TOOL_PROTOCOL=on|off`
+- Override explicitly with `AISTRALIS_STRUCTURED_TOOL_PROTOCOL=on|off`
 
 Anthropic example:
 
 ```bash
 ANTHROPIC_API_URL=https://api.anthropic.com/v1/messages \
-AISTAR_API_PROTOCOL=anthropic \
+AISTRALIS_API_PROTOCOL=anthropic \
 ANTHROPIC_API_KEY=your_key \
 cargo run
 ```
@@ -39,7 +39,7 @@ OpenAI example:
 
 ```bash
 ANTHROPIC_API_URL=https://api.openai.com/v1/chat/completions \
-AISTAR_API_PROTOCOL=openai \
+AISTRALIS_API_PROTOCOL=openai \
 ANTHROPIC_API_KEY=your_key \
 cargo run
 ```

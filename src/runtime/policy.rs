@@ -2,6 +2,7 @@ pub trait RuntimeCorePolicy {
     fn sanitize_assistant_text(&self, text: &str) -> String;
     fn request_requires_tool_evidence(&self, input: &str) -> bool;
     fn tool_retry_instruction(&self) -> &'static str;
+    fn repeated_tool_round_instruction(&self) -> &'static str;
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -14,6 +15,11 @@ answering. If structured tool calls are unavailable, use tagged syntax:
 <function=tool_name>
 <parameter=arg>value</parameter>
 </function>";
+
+const REPEATED_TOOL_ROUND_INSTRUCTION: &str =
+    "You repeated the same read/search tool call with unchanged arguments. \
+Do not repeat identical tool calls. Use existing tool results to answer now. \
+Only call a different tool if new evidence is required.";
 
 const TOOL_REQUIRED_HINTS: [&str; 26] = [
     "file",
@@ -66,6 +72,10 @@ impl RuntimeCorePolicy for DefaultRuntimeCorePolicy {
 
     fn tool_retry_instruction(&self) -> &'static str {
         TOOL_RETRY_INSTRUCTION
+    }
+
+    fn repeated_tool_round_instruction(&self) -> &'static str {
+        REPEATED_TOOL_ROUND_INSTRUCTION
     }
 }
 

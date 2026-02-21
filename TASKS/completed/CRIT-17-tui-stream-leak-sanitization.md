@@ -13,7 +13,7 @@
 Two protocol-level leaks were still visible in the TUI history pane:
 
 1. **Debug payload leak into interactive terminal output**
-   `AISTAR_DEBUG_PAYLOAD=1` printed full request JSON to `stderr` while the ratatui
+   `AISTRALIS_DEBUG_PAYLOAD=1` printed full request JSON to `stderr` while the ratatui
    UI was active, which contaminated the visible transcript/scrollback area and made
    the three-pane experience unreadable during streaming.
 
@@ -30,9 +30,9 @@ discipline in ADR-009.
 ## Decision
 
 1. **Route debug payload logging away from live TUI stderr noise**
-   - Keep `AISTAR_DEBUG_PAYLOAD` behavior enabled.
+   - Keep `AISTRALIS_DEBUG_PAYLOAD` behavior enabled.
    - When `stderr` is a terminal, append debug payload output to a file path
-     (`AISTAR_DEBUG_PAYLOAD_PATH`, default `/tmp/aistar-debug-payload.log`) instead
+     (`AISTRALIS_DEBUG_PAYLOAD_PATH`, default `/tmp/aistralis-debug-payload.log`) instead
      of printing multi-line JSON into the active UI.
    - Preserve direct `stderr` logging when output is non-interactive (non-TTY).
 
@@ -54,7 +54,7 @@ discipline in ADR-009.
 
 ## Definition of Done
 
-1. `AISTAR_DEBUG_PAYLOAD=1` no longer floods interactive TUI panes with raw JSON.
+1. `AISTRALIS_DEBUG_PAYLOAD=1` no longer floods interactive TUI panes with raw JSON.
 2. `<function=...>` / `<parameter=...>` syntax is not shown in assistant history
    lines during local fallback streaming.
 3. Sanitization removes incomplete tag suffix fragments during incremental deltas.

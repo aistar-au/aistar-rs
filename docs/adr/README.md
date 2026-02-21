@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This directory captures *why* significant decisions were made in `aistar`. ADRs are permanent — even superseded records stay in the log. When an agent or contributor questions a design choice, the ADR is the authoritative answer.
+This directory captures *why* significant decisions were made in `aistralis`. ADRs are permanent — even superseded records stay in the log. When an agent or contributor questions a design choice, the ADR is the authoritative answer.
 
 ## Relationship to TASKS/
 
@@ -39,6 +39,8 @@ A task manifest may reference an ADR. An ADR may spawn one or more tasks. They a
 | [ADR-012](ADR-012-runtime-core-tui-deployment-gate.md) | Runtime-core TUI deployment gate | Accepted |
 | [ADR-014](ADR-014-runtime-core-policy-dedup-and-enforcement.md) | Runtime-core policy deduplication and enforcement | Accepted |
 | [ADR-015](ADR-015-local-endpoint-text-protocol-default.md) | Local endpoint text-protocol default for tool loop reliability | Accepted |
+| [ADR-016](ADR-016-local-tool-loop-guard-and-correction.md) | Local tool-loop guard and correction path | Accepted |
+| [ADR-017](ADR-017-append-terminal-single-session.md) | Append-terminal single session runtime | Accepted |
 
 ## Template
 

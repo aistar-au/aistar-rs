@@ -1,24 +1,21 @@
 use crate::api::ApiClient;
 use crate::config::Config;
 use crate::runtime::context::RuntimeContext;
-use crate::runtime::frontend::{FrontendAdapter, UserInputEvent};
+#[cfg(test)]
+use crate::runtime::frontend::UserInputEvent;
 use crate::runtime::mode::RuntimeMode;
 use crate::runtime::policy::sanitize_assistant_text;
 use crate::runtime::r#loop::Runtime;
 use crate::runtime::UiUpdate;
 use crate::state::{ConversationManager, ToolApprovalRequest};
 use crate::tools::ToolExecutor;
-use crate::ui::layout::split_three_pane_layout;
-use crate::ui::render::{
-    input_visual_rows, render_input, render_messages, render_overlay_modal, render_status_line,
-    OverlayModal,
-};
+use crate::ui::render::history_visual_line_count;
+#[cfg(test)]
+use crate::ui::render::input_visual_rows;
 use anyhow::Result;
-use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{backend::CrosstermBackend, Frame, Terminal};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use std::io::Stdout;
+#[cfg(test)]
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+#[cfg(test)]
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -36,30 +33,24 @@ struct PendingPatchApproval {
 }
 
 const DEFAULT_MAX_HISTORY_LINES: usize = 2000;
-const MAX_HISTORY_LINES_ENV: &str = "AISTAR_MAX_HISTORY_LINES";
-const SCROLL_PAGE_UP_CMD_PREFIX: &str = "__AISTAR_SCROLL_PAGE_UP__:";
-const SCROLL_PAGE_DOWN_CMD_PREFIX: &str = "__AISTAR_SCROLL_PAGE_DOWN__:";
-const SCROLL_HOME_CMD: &str = "__AISTAR_SCROLL_HOME__";
-const SCROLL_END_CMD: &str = "__AISTAR_SCROLL_END__";
-const CURSOR_TICK_MS_ENV: &str = "AISTAR_CURSOR_TICK_MS";
-const STATUS_TICK_MS_ENV: &str = "AISTAR_STATUS_TICK_MS";
-const DEFAULT_CURSOR_TICK_MS: u64 = 500;
-const DEFAULT_STATUS_TICK_MS: u64 = 120;
-const MIN_CURSOR_TICK_MS: u64 = 100;
-const MAX_CURSOR_TICK_MS: u64 = 2000;
-const MIN_STATUS_TICK_MS: u64 = 50;
-const MAX_STATUS_TICK_MS: u64 = 500;
+const MAX_HISTORY_LINES_ENV: &str = "AISTRALIS_MAX_HISTORY_LINES";
+const SCROLL_PAGE_UP_CMD_PREFIX: &str = "__AISTRALIS_SCROLL_PAGE_UP__:";
+const SCROLL_PAGE_DOWN_CMD_PREFIX: &str = "__AISTRALIS_SCROLL_PAGE_DOWN__:";
+const SCROLL_HOME_CMD: &str = "__AISTRALIS_SCROLL_HOME__";
+const SCROLL_END_CMD: &str = "__AISTRALIS_SCROLL_END__";
+#[cfg(test)]
 const MAX_INPUT_PANE_ROWS: usize = 6;
-const OVERLAY_SCROLL_UP_CMD: &str = "__AISTAR_OVERLAY_SCROLL_UP__";
-const OVERLAY_SCROLL_DOWN_CMD: &str = "__AISTAR_OVERLAY_SCROLL_DOWN__";
-const OVERLAY_SCROLL_PAGE_UP_CMD_PREFIX: &str = "__AISTAR_OVERLAY_SCROLL_PAGE_UP__:";
-const OVERLAY_SCROLL_PAGE_DOWN_CMD_PREFIX: &str = "__AISTAR_OVERLAY_SCROLL_PAGE_DOWN__:";
-const OVERLAY_SCROLL_HOME_CMD: &str = "__AISTAR_OVERLAY_SCROLL_HOME__";
-const OVERLAY_SCROLL_END_CMD: &str = "__AISTAR_OVERLAY_SCROLL_END__";
+const OVERLAY_SCROLL_UP_CMD: &str = "__AISTRALIS_OVERLAY_SCROLL_UP__";
+const OVERLAY_SCROLL_DOWN_CMD: &str = "__AISTRALIS_OVERLAY_SCROLL_DOWN__";
+const OVERLAY_SCROLL_PAGE_UP_CMD_PREFIX: &str = "__AISTRALIS_OVERLAY_SCROLL_PAGE_UP__:";
+const OVERLAY_SCROLL_PAGE_DOWN_CMD_PREFIX: &str = "__AISTRALIS_OVERLAY_SCROLL_PAGE_DOWN__:";
+const OVERLAY_SCROLL_HOME_CMD: &str = "__AISTRALIS_OVERLAY_SCROLL_HOME__";
+const OVERLAY_SCROLL_END_CMD: &str = "__AISTRALIS_OVERLAY_SCROLL_END__";
 
 struct HistoryState {
     lines: Vec<String>,
     turn_in_progress: bool,
+    cancel_pending: bool,
     active_assistant_index: Option<usize>,
     scroll_offset: usize,
     auto_follow: bool,
@@ -70,6 +61,7 @@ impl Default for HistoryState {
         Self {
             lines: Vec::new(),
             turn_in_progress: false,
+            cancel_pending: false,
             active_assistant_index: None,
             scroll_offset: 0,
             auto_follow: true,
@@ -84,6 +76,7 @@ struct OverlayState {
     auto_approve_session: bool,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct InputState {
     buffer: String,
@@ -99,6 +92,7 @@ pub struct TuiMode {
     history_state: HistoryState,
     overlay_state: OverlayState,
     history_line_cap: usize,
+    #[cfg(test)]
     repo_label: String,
     pending_quit: bool,
     quit_requested: bool,
@@ -110,17 +104,21 @@ impl TuiMode {
             history_state: HistoryState::default(),
             overlay_state: OverlayState::default(),
             history_line_cap: resolve_history_line_cap(),
+            #[cfg(test)]
             repo_label: resolve_repo_label(),
             pending_quit: false,
             quit_requested: false,
         }
     }
 
+    #[cfg(test)]
     fn mode_status_label(&self) -> &'static str {
         if self.overlay_active() {
             "overlay"
         } else if self.pending_quit {
             "quit-arm"
+        } else if self.history_state.cancel_pending {
+            "cancelling"
         } else if self.history_state.turn_in_progress {
             "streaming"
         } else {
@@ -128,6 +126,7 @@ impl TuiMode {
         }
     }
 
+    #[cfg(test)]
     fn approval_status_label(&self) -> &'static str {
         if self.overlay_active() {
             "pending"
@@ -138,23 +137,37 @@ impl TuiMode {
         }
     }
 
+    #[cfg(test)]
     fn status_line(&self) -> String {
+        let history_rows = history_visual_line_count(&self.history_state.lines);
         format!(
             "mode:{} approval:{} history:{} repo:{}",
             self.mode_status_label(),
             self.approval_status_label(),
-            self.history_state.lines.len(),
+            history_rows,
             self.repo_label
         )
     }
 
-    fn overlay_active(&self) -> bool {
+    pub fn overlay_active(&self) -> bool {
         self.overlay_state.pending_approval.is_some()
             || self.overlay_state.pending_patch_approval.is_some()
     }
 
     fn patch_overlay_active(&self) -> bool {
         self.overlay_state.pending_patch_approval.is_some()
+    }
+
+    pub fn history_lines(&self) -> &[String] {
+        &self.history_state.lines
+    }
+
+    pub fn active_assistant_index(&self) -> Option<usize> {
+        self.history_state.active_assistant_index
+    }
+
+    pub fn quit_requested(&self) -> bool {
+        self.quit_requested
     }
 
     fn resolve_pending_approval(&mut self, approved: bool) {
@@ -282,7 +295,7 @@ impl TuiMode {
     }
 
     fn max_scroll_offset(&self) -> usize {
-        self.history_state.lines.len().saturating_sub(1)
+        history_visual_line_count(&self.history_state.lines).saturating_sub(1)
     }
 
     fn set_scroll_to_bottom(&mut self) {
@@ -357,8 +370,9 @@ fn resolve_history_line_cap() -> usize {
         .unwrap_or(DEFAULT_MAX_HISTORY_LINES)
 }
 
+#[cfg(test)]
 fn resolve_repo_label() -> String {
-    std::env::var("AISTAR_REPO_LABEL")
+    std::env::var("AISTRALIS_REPO_LABEL")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -374,54 +388,12 @@ fn resolve_repo_label() -> String {
         .unwrap_or_else(|| "workspace".to_string())
 }
 
-fn resolve_tick_interval_ms(env_key: &str, default_ms: u64, min_ms: u64, max_ms: u64) -> u64 {
-    std::env::var(env_key)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|value| value.clamp(min_ms, max_ms))
-        .unwrap_or(default_ms)
-}
-
+#[cfg(test)]
 fn input_rows_for_buffer(input: &str, width: usize) -> u16 {
     input_visual_rows(input, width).clamp(1, MAX_INPUT_PANE_ROWS) as u16
 }
 
-fn render_state_hash(mode: &TuiMode, input_state: &InputState) -> u64 {
-    let mut hasher = DefaultHasher::new();
-
-    mode.status_line().hash(&mut hasher);
-    mode.history_state.lines.hash(&mut hasher);
-    mode.history_state.turn_in_progress.hash(&mut hasher);
-    mode.history_state.active_assistant_index.hash(&mut hasher);
-    mode.history_state.scroll_offset.hash(&mut hasher);
-    mode.history_state.auto_follow.hash(&mut hasher);
-    mode.overlay_state.auto_approve_session.hash(&mut hasher);
-    mode.pending_quit.hash(&mut hasher);
-    mode.quit_requested.hash(&mut hasher);
-
-    match mode.overlay_state.pending_approval.as_ref() {
-        Some(pending) => {
-            true.hash(&mut hasher);
-            pending.tool_name.hash(&mut hasher);
-            pending.input_preview.hash(&mut hasher);
-        }
-        None => false.hash(&mut hasher),
-    }
-    match mode.overlay_state.pending_patch_approval.as_ref() {
-        Some(pending) => {
-            true.hash(&mut hasher);
-            pending.patch_preview.hash(&mut hasher);
-            pending.scroll_offset.hash(&mut hasher);
-        }
-        None => false.hash(&mut hasher),
-    }
-
-    input_state.buffer.hash(&mut hasher);
-    input_state.cursor.hash(&mut hasher);
-
-    hasher.finish()
-}
-
+#[cfg(test)]
 struct RenderGuard {
     dirty: bool,
     cursor_tick: Duration,
@@ -430,23 +402,8 @@ struct RenderGuard {
     last_render_state_hash: Option<u64>,
 }
 
+#[cfg(test)]
 impl RenderGuard {
-    fn new(now: Instant) -> Self {
-        let cursor_tick = Duration::from_millis(resolve_tick_interval_ms(
-            CURSOR_TICK_MS_ENV,
-            DEFAULT_CURSOR_TICK_MS,
-            MIN_CURSOR_TICK_MS,
-            MAX_CURSOR_TICK_MS,
-        ));
-        let status_tick = Duration::from_millis(resolve_tick_interval_ms(
-            STATUS_TICK_MS_ENV,
-            DEFAULT_STATUS_TICK_MS,
-            MIN_STATUS_TICK_MS,
-            MAX_STATUS_TICK_MS,
-        ));
-        Self::with_intervals(cursor_tick, status_tick, now)
-    }
-
     fn with_intervals(cursor_tick: Duration, status_tick: Duration, now: Instant) -> Self {
         Self {
             dirty: true,
@@ -498,12 +455,19 @@ impl RuntimeMode for TuiMode {
         }
 
         if self.history_state.turn_in_progress {
-            self.push_history_line("[busy - turn in progress, input discarded]".to_string());
+            if self.history_state.cancel_pending {
+                self.push_history_line(
+                    "[busy - cancelling current turn, input discarded]".to_string(),
+                );
+            } else {
+                self.push_history_line("[busy - turn in progress, input discarded]".to_string());
+            }
             return;
         }
 
         self.pending_quit = false;
         self.quit_requested = false;
+        self.history_state.cancel_pending = false;
         self.push_history_line(format!("> {input}"));
         self.push_history_line(String::new());
         self.history_state.active_assistant_index = Some(self.history_state.lines.len() - 1);
@@ -514,9 +478,15 @@ impl RuntimeMode for TuiMode {
     fn on_model_update(&mut self, update: UiUpdate, _ctx: &mut RuntimeContext) {
         match update {
             UiUpdate::StreamDelta(text) => {
+                if self.history_state.cancel_pending {
+                    return;
+                }
                 let idx = match self.history_state.active_assistant_index {
                     Some(idx) => idx,
                     None => {
+                        if !self.history_state.turn_in_progress {
+                            return;
+                        }
                         self.push_history_line(String::new());
                         let idx = self.history_state.lines.len() - 1;
                         self.history_state.active_assistant_index = Some(idx);
@@ -539,6 +509,10 @@ impl RuntimeMode for TuiMode {
                 input_preview,
                 response_tx,
             }) => {
+                if self.history_state.cancel_pending {
+                    let _ = response_tx.send(false);
+                    return;
+                }
                 if self.overlay_state.auto_approve_session {
                     let _ = response_tx.send(true);
                     self.push_history_line(format!("[auto-approved tool: {tool_name} session]"));
@@ -559,6 +533,7 @@ impl RuntimeMode for TuiMode {
             UiUpdate::TurnComplete => {
                 self.resolve_pending_approval(false);
                 self.resolve_pending_patch_approval(false);
+                self.history_state.cancel_pending = false;
                 self.history_state.turn_in_progress = false;
                 self.history_state.active_assistant_index = None;
                 if self.history_state.auto_follow {
@@ -570,6 +545,7 @@ impl RuntimeMode for TuiMode {
             UiUpdate::Error(msg) => {
                 self.resolve_pending_approval(false);
                 self.resolve_pending_patch_approval(false);
+                self.history_state.cancel_pending = false;
                 self.push_history_line(format!("[error] {msg}"));
                 self.history_state.turn_in_progress = false;
                 self.history_state.active_assistant_index = None;
@@ -579,12 +555,14 @@ impl RuntimeMode for TuiMode {
 
     fn on_interrupt(&mut self, ctx: &mut RuntimeContext) {
         if self.history_state.turn_in_progress {
+            if self.history_state.cancel_pending {
+                return;
+            }
             ctx.cancel_turn();
             self.resolve_pending_approval(false);
             self.resolve_pending_patch_approval(false);
-            self.history_state.turn_in_progress = false;
-            self.history_state.active_assistant_index = None;
-            self.push_history_line("[turn cancelled]".to_string());
+            self.history_state.cancel_pending = true;
+            self.push_history_line("[turn cancellation requested]".to_string());
             self.pending_quit = false;
             self.quit_requested = false;
             return;
@@ -604,15 +582,18 @@ impl RuntimeMode for TuiMode {
 }
 
 #[derive(Clone)]
+#[cfg(test)]
 struct EditorSnapshot {
     buffer: String,
     cursor: usize,
 }
 
+#[cfg(test)]
 struct InputEditor {
     input_state: InputState,
 }
 
+#[cfg(test)]
 enum InputAction {
     None,
     Submit(String),
@@ -620,6 +601,7 @@ enum InputAction {
     Quit,
 }
 
+#[cfg(test)]
 impl InputEditor {
     fn new() -> Self {
         Self {
@@ -842,79 +824,7 @@ impl InputEditor {
     }
 }
 
-pub struct TuiFrontend {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    quit: bool,
-    editor: InputEditor,
-    render_guard: RenderGuard,
-}
-
-impl TuiFrontend {
-    pub fn new(terminal: Terminal<CrosstermBackend<Stdout>>) -> Self {
-        Self {
-            terminal,
-            quit: false,
-            editor: InputEditor::new(),
-            render_guard: RenderGuard::new(Instant::now()),
-        }
-    }
-
-    fn current_history_viewport_rows(&self) -> usize {
-        let size = self.terminal.size().ok();
-        let Some(size) = size else {
-            return 1;
-        };
-        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-        let input_rows =
-            input_rows_for_buffer(&self.editor.input_state.buffer, area.width as usize);
-        split_three_pane_layout(area, input_rows)
-            .history
-            .height
-            .max(1) as usize
-    }
-
-    fn scroll_command_for_event(&self, event: &Event) -> Option<String> {
-        let Event::Key(key) = event else {
-            return None;
-        };
-        let page_step = self.current_history_viewport_rows().max(1);
-        match key.code {
-            KeyCode::PageUp => Some(format!("{SCROLL_PAGE_UP_CMD_PREFIX}{page_step}")),
-            KeyCode::PageDown => Some(format!("{SCROLL_PAGE_DOWN_CMD_PREFIX}{page_step}")),
-            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(SCROLL_HOME_CMD.to_string())
-            }
-            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                Some(SCROLL_END_CMD.to_string())
-            }
-            _ => None,
-        }
-    }
-
-    fn current_overlay_viewport_rows(&self) -> usize {
-        self.terminal
-            .size()
-            .map(|size| size.height.saturating_sub(8).max(1) as usize)
-            .unwrap_or(1)
-    }
-
-    fn overlay_scroll_command_for_event(&self, event: &Event) -> Option<String> {
-        let Event::Key(key) = event else {
-            return None;
-        };
-        let page_step = self.current_overlay_viewport_rows().max(1);
-        match key.code {
-            KeyCode::Up => Some(OVERLAY_SCROLL_UP_CMD.to_string()),
-            KeyCode::Down => Some(OVERLAY_SCROLL_DOWN_CMD.to_string()),
-            KeyCode::PageUp => Some(format!("{OVERLAY_SCROLL_PAGE_UP_CMD_PREFIX}{page_step}")),
-            KeyCode::PageDown => Some(format!("{OVERLAY_SCROLL_PAGE_DOWN_CMD_PREFIX}{page_step}")),
-            KeyCode::Home => Some(OVERLAY_SCROLL_HOME_CMD.to_string()),
-            KeyCode::End => Some(OVERLAY_SCROLL_END_CMD.to_string()),
-            _ => None,
-        }
-    }
-}
-
+#[cfg(test)]
 fn overlay_event_to_user_input(event: Event) -> Option<UserInputEvent> {
     match event {
         Event::Key(key) => match key.code {
@@ -942,49 +852,8 @@ fn overlay_event_to_user_input(event: Event) -> Option<UserInputEvent> {
     }
 }
 
-fn draw_tui_frame(frame: &mut Frame<'_>, mode: &TuiMode, input_state: &InputState) {
-    let input_rows = input_rows_for_buffer(&input_state.buffer, frame.area().width as usize);
-    let panes = split_three_pane_layout(frame.area(), input_rows);
-    let status_line = mode.status_line();
-
-    for pass in render_pass_order(mode) {
-        match pass {
-            RenderPass::Header => render_status_line(frame, panes.header, &status_line),
-            RenderPass::History => render_messages(
-                frame,
-                panes.history,
-                &mode.history_state.lines,
-                mode.history_state.scroll_offset,
-            ),
-            RenderPass::Input => {
-                render_input(frame, panes.input, &input_state.buffer, input_state.cursor)
-            }
-            RenderPass::Overlay => {
-                if let Some(pending) = mode.overlay_state.pending_approval.as_ref() {
-                    render_overlay_modal(
-                        frame,
-                        OverlayModal::ToolPermission {
-                            tool_name: &pending.tool_name,
-                            input_preview: &pending.input_preview,
-                            auto_approve_enabled: mode.overlay_state.auto_approve_session,
-                        },
-                    );
-                } else if let Some(pending) = mode.overlay_state.pending_patch_approval.as_ref() {
-                    render_overlay_modal(
-                        frame,
-                        OverlayModal::PatchApprove {
-                            patch_preview: &pending.patch_preview,
-                            scroll_offset: pending.scroll_offset,
-                            viewport_rows: frame.area().height.saturating_sub(9).max(1) as usize,
-                        },
-                    );
-                }
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 enum RenderPass {
     Header,
     History,
@@ -992,6 +861,7 @@ enum RenderPass {
     Overlay,
 }
 
+#[cfg(test)]
 fn render_pass_order(mode: &TuiMode) -> Vec<RenderPass> {
     let mut order = vec![RenderPass::Header, RenderPass::History, RenderPass::Input];
     if mode.overlay_active() {
@@ -1000,95 +870,17 @@ fn render_pass_order(mode: &TuiMode) -> Vec<RenderPass> {
     order
 }
 
-fn frontend_should_quit_for_mode(mode: &TuiMode) -> bool {
-    mode.quit_requested
-}
+pub fn build_runtime(config: Config) -> Result<(Runtime<TuiMode>, RuntimeContext)> {
+    let client = ApiClient::new(&config)?;
+    let executor = ToolExecutor::new(config.working_dir.clone());
+    let conversation = ConversationManager::new(client, executor);
 
-impl FrontendAdapter<TuiMode> for TuiFrontend {
-    fn poll_user_input(&mut self, mode: &TuiMode) -> Option<UserInputEvent> {
-        if frontend_should_quit_for_mode(mode) {
-            self.quit = true;
-            return None;
-        }
-        if poll(self.render_guard.poll_timeout()).unwrap_or(false) {
-            if let Ok(event) = read() {
-                if mode.overlay_active() {
-                    if mode.patch_overlay_active() {
-                        if let Some(command) = self.overlay_scroll_command_for_event(&event) {
-                            return Some(UserInputEvent::Text(command));
-                        }
-                    }
-                    return overlay_event_to_user_input(event);
-                }
-                if let Some(command) = self.scroll_command_for_event(&event) {
-                    return Some(UserInputEvent::Text(command));
-                }
-                match self.editor.apply_event(event) {
-                    InputAction::None => {}
-                    InputAction::Submit(value) => return Some(UserInputEvent::Text(value)),
-                    InputAction::Interrupt => return Some(UserInputEvent::Interrupt),
-                    InputAction::Quit => self.quit = true,
-                }
-            }
-        }
-        None
-    }
+    let (update_tx, update_rx) = mpsc::unbounded_channel::<UiUpdate>();
+    let ctx = RuntimeContext::new(conversation, update_tx, CancellationToken::new());
 
-    fn render(&mut self, mode: &TuiMode) {
-        let input_state = &self.editor.input_state;
-        let state_hash = render_state_hash(mode, input_state);
-        if self.render_guard.should_draw(Instant::now(), state_hash) {
-            let _ = self.terminal.draw(|frame| {
-                draw_tui_frame(frame, mode, input_state);
-            });
-        }
-    }
-
-    fn should_quit(&self) -> bool {
-        self.quit
-    }
-}
-
-pub struct App {
-    runtime: Runtime<TuiMode>,
-    frontend: TuiFrontend,
-    ctx: RuntimeContext,
-}
-
-impl App {
-    pub fn new(config: Config) -> Result<Self> {
-        crate::terminal::install_panic_hook_once();
-
-        let client = ApiClient::new(&config)?;
-        let executor = ToolExecutor::new(config.working_dir.clone());
-        let conversation = ConversationManager::new(client, executor);
-
-        let (update_tx, update_rx) = mpsc::unbounded_channel::<UiUpdate>();
-        let ctx = RuntimeContext::new(conversation, update_tx, CancellationToken::new());
-
-        let mode = TuiMode::new();
-        let runtime = Runtime::new(mode, update_rx);
-
-        let terminal = crate::terminal::setup()?;
-        let frontend = TuiFrontend::new(terminal);
-
-        Ok(Self {
-            runtime,
-            frontend,
-            ctx,
-        })
-    }
-
-    pub async fn run(&mut self) -> Result<()> {
-        self.runtime.run(&mut self.frontend, &mut self.ctx).await;
-        Ok(())
-    }
-}
-
-impl Drop for App {
-    fn drop(&mut self) {
-        let _ = crate::terminal::restore();
-    }
+    let mode = TuiMode::new();
+    let runtime = Runtime::new(mode, update_rx);
+    Ok((runtime, ctx))
 }
 
 #[cfg(test)]
@@ -1313,6 +1105,20 @@ mod tests {
     }
 
     #[test]
+    fn test_history_status_and_scroll_use_visual_rows() {
+        let mode = TuiMode {
+            history_state: HistoryState {
+                lines: vec!["a\nb\nc".to_string()],
+                ..HistoryState::default()
+            },
+            ..TuiMode::new()
+        };
+
+        assert_eq!(mode.max_scroll_offset(), 2);
+        assert!(mode.status_line().contains("history:3"));
+    }
+
+    #[test]
     fn test_idle_interrupt_shows_feedback() {
         let mut mode = TuiMode::new();
         let mut ctx = setup_ctx();
@@ -1338,7 +1144,7 @@ mod tests {
             "second idle interrupt must request quit"
         );
         assert!(
-            frontend_should_quit_for_mode(&mode),
+            mode.quit_requested(),
             "frontend quit path must observe mode quit request"
         );
     }
@@ -1874,7 +1680,7 @@ mod tests {
         let mut ctx = setup_ctx();
         let mut mode = TuiMode::new();
 
-        mode.on_user_input("__AISTAR_INTERRUPT__".to_string(), &mut ctx);
+        mode.on_user_input("__AISTRALIS_INTERRUPT__".to_string(), &mut ctx);
         assert!(
             mode.history_state.turn_in_progress,
             "plain text matching old sentinel must be treated as normal user input"
@@ -1882,9 +1688,46 @@ mod tests {
 
         mode.on_interrupt(&mut ctx);
         assert!(
-            !mode.history_state.turn_in_progress,
-            "typed interrupt should cancel active turn"
+            mode.history_state.turn_in_progress,
+            "typed interrupt should keep turn active until TurnComplete drains"
         );
+        assert!(
+            mode.history_state.cancel_pending,
+            "typed interrupt should arm cancel-pending state"
+        );
+        assert!(
+            mode.history_state
+                .lines
+                .iter()
+                .any(|line| line.contains("[turn cancellation requested]")),
+            "cancel path should provide visible feedback"
+        );
+
+        mode.on_model_update(UiUpdate::TurnComplete, &mut ctx);
+        assert!(!mode.history_state.turn_in_progress);
+        assert!(!mode.history_state.cancel_pending);
+    }
+
+    #[test]
+    fn test_stream_delta_ignored_without_active_turn_slot() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+        mode.on_model_update(UiUpdate::StreamDelta("ghost delta".to_string()), &mut ctx);
+        assert!(
+            mode.history_state.lines.is_empty(),
+            "stale stream deltas must be ignored after turn completion/cancel"
+        );
+    }
+
+    #[test]
+    fn test_cancel_pending_blocks_stream_delta_appends() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+        mode.on_user_input("hello".to_string(), &mut ctx);
+        mode.on_interrupt(&mut ctx);
+        mode.on_model_update(UiUpdate::StreamDelta("stale".to_string()), &mut ctx);
+        assert_eq!(mode.history_state.lines[0], "> hello");
+        assert_eq!(mode.history_state.lines[1], "");
     }
 
     #[tokio::test]

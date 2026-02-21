@@ -4,7 +4,7 @@ use crate::edit_diff::DEFAULT_EDIT_DIFF_CONTEXT_LINES;
 use crate::runtime::policy::{default_runtime_policy, RuntimeCorePolicy};
 use crate::tool_preview::{
     format_read_file_snapshot_message, preview_tool_input, read_file_path, ReadFileSnapshotCache,
-    ReadFileSummaryMessageStyle, ToolPreviewStyle,
+    ReadFileSnapshotSummary, ReadFileSummaryMessageStyle, ToolPreviewStyle,
 };
 use crate::tools::ToolExecutor;
 use crate::types::{ApiMessage, Content, ContentBlock, StreamEvent};
@@ -121,6 +121,7 @@ impl ConversationManager {
         self.current_turn_blocks.clear();
         let original_user_input = content.clone();
         self.push_user_message(content);
+        let mut turn_user_anchor_index = self.api_messages.len().saturating_sub(1);
 
         let core_policy = default_runtime_policy();
         let use_structured_tool_protocol = self.client.supports_structured_tool_protocol();
@@ -134,16 +135,22 @@ impl ConversationManager {
         let stream_local_tool_events = stream_local_tool_events_enabled();
         let require_tool_approval = tool_approval_enabled(self.client.is_local_endpoint());
         let mut rounds = 0usize;
-        let mut forced_tool_retry_used = false;
+        let mut forced_tool_retry_count = 0usize;
         let mut saw_any_tool_round = false;
         let mut previous_round_signature: Option<Vec<String>> = None;
         let mut repeated_read_only_rounds = 0usize;
+        let mut repeated_round_nudge_used = false;
+        let mut last_assistant_text_for_history = String::new();
         loop {
             self.current_turn_blocks.clear();
-            self.prune_message_history(limits.max_api_messages);
+            turn_user_anchor_index = self
+                .prune_message_history_preserving(limits.max_api_messages, turn_user_anchor_index);
             rounds += 1;
             if rounds > max_tool_rounds {
-                bail!("Exceeded max tool rounds ({max_tool_rounds}). Possible tool-calling loop.");
+                return Ok(render_loop_limit_guard_message(
+                    &last_assistant_text_for_history,
+                    max_tool_rounds,
+                ));
             }
 
             let mut stream = self.client.create_stream(&self.api_messages).await?;
@@ -404,6 +411,7 @@ impl ConversationManager {
                 assistant_text_for_history.clone()
             };
 
+            let mut inject_repeated_round_nudge = false;
             if !tool_use_blocks.is_empty() {
                 saw_any_tool_round = true;
                 let current_signature = tool_round_signature(&tool_use_blocks);
@@ -419,9 +427,14 @@ impl ConversationManager {
                 previous_round_signature = Some(current_signature);
 
                 if repeated_read_only_rounds >= 2 {
-                    bail!(
-                        "Detected repeated identical read/search tool round. Stopping to avoid infinite tool loop."
-                    );
+                    if !repeated_round_nudge_used && rounds < max_tool_rounds {
+                        repeated_round_nudge_used = true;
+                        inject_repeated_round_nudge = true;
+                    } else {
+                        return Ok(render_repeated_tool_guard_message(
+                            &assistant_text_for_history,
+                        ));
+                    }
                 }
             } else {
                 previous_round_signature = None;
@@ -454,20 +467,37 @@ impl ConversationManager {
                     content: Content::Text(assistant_history_text),
                 });
             }
+            last_assistant_text_for_history = assistant_text_for_history.clone();
+
+            if inject_repeated_round_nudge {
+                self.api_messages.push(ApiMessage {
+                    role: "user".to_string(),
+                    content: Content::Text(
+                        core_policy.repeated_tool_round_instruction().to_string(),
+                    ),
+                });
+                continue;
+            }
 
             if tool_use_blocks.is_empty() {
                 if self.client.is_local_endpoint()
                     && requires_tool_evidence
                     && !saw_any_tool_round
-                    && !forced_tool_retry_used
+                    && forced_tool_retry_count < 2
                     && rounds < max_tool_rounds
                 {
-                    forced_tool_retry_used = true;
+                    forced_tool_retry_count += 1;
                     self.api_messages.push(ApiMessage {
                         role: "user".to_string(),
                         content: Content::Text(core_policy.tool_retry_instruction().to_string()),
                     });
                     continue;
+                }
+                if self.client.is_local_endpoint() && requires_tool_evidence && !saw_any_tool_round
+                {
+                    return Ok(render_missing_tool_evidence_guard_message(
+                        &assistant_text_for_history,
+                    ));
                 }
                 if use_structured_blocks {
                     self.promote_thinking_blocks_to_final_text(
@@ -673,6 +703,7 @@ impl ConversationManager {
         }
     }
 
+    #[cfg(test)]
     fn prune_message_history(&mut self, max_api_messages: usize) {
         if self.api_messages.len() <= max_api_messages {
             return;
@@ -701,6 +732,52 @@ impl ConversationManager {
         }
     }
 
+    fn prune_message_history_preserving(
+        &mut self,
+        max_api_messages: usize,
+        preserve_index: usize,
+    ) -> usize {
+        if self.api_messages.is_empty() {
+            return 0;
+        }
+        if self.api_messages.len() <= max_api_messages {
+            return preserve_index.min(self.api_messages.len().saturating_sub(1));
+        }
+
+        let len = self.api_messages.len();
+        let mut keep_start = len.saturating_sub(max_api_messages);
+        if preserve_index < keep_start {
+            keep_start = preserve_index;
+        }
+
+        while keep_start < len {
+            if keep_start == preserve_index {
+                break;
+            }
+            let message = &self.api_messages[keep_start];
+            if message.role == "user" && !message_contains_tool_result(message) {
+                break;
+            }
+            keep_start += 1;
+        }
+
+        if keep_start > preserve_index {
+            keep_start = preserve_index;
+        }
+
+        if keep_start >= len {
+            self.api_messages.clear();
+            return 0;
+        }
+
+        if keep_start > 0 {
+            self.api_messages.drain(0..keep_start);
+            preserve_index.saturating_sub(keep_start)
+        } else {
+            preserve_index
+        }
+    }
+
     fn format_tool_result_for_history(
         &mut self,
         name: &str,
@@ -719,14 +796,52 @@ impl ConversationManager {
             // The fallback "<missing>" is a display-layer decision kept here, not baked into the helper.
             let path = read_file_path(input).unwrap_or_else(|| "<missing>".to_string());
             let summary = self.read_file_history_cache.summarize(&path, output);
+            return self.format_read_file_result_for_model_context(&path, output, summary);
+        }
+
+        output.clone()
+    }
+
+    fn format_read_file_result_for_model_context(
+        &self,
+        path: &str,
+        output: &str,
+        summary: ReadFileSnapshotSummary,
+    ) -> String {
+        if !self.client.is_local_endpoint() {
             return format_read_file_snapshot_message(
-                &path,
+                path,
                 summary,
                 ReadFileSummaryMessageStyle::History,
             );
         }
 
-        output.clone()
+        match summary {
+            ReadFileSnapshotSummary::Unchanged { .. } => format_read_file_snapshot_message(
+                path,
+                summary,
+                ReadFileSummaryMessageStyle::History,
+            ),
+            ReadFileSnapshotSummary::FirstRead { .. } | ReadFileSnapshotSummary::Changed { .. } => {
+                let summary_message = match summary {
+                    ReadFileSnapshotSummary::FirstRead { chars, lines } => format!(
+                        "Read {path}: {chars} chars, {lines} lines. Snapshot included below for model context."
+                    ),
+                    ReadFileSnapshotSummary::Changed {
+                        before_chars,
+                        before_lines,
+                        after_chars,
+                        after_lines,
+                    } => format!(
+                        "Read {path}: content changed ({before_chars} chars/{before_lines} lines -> {after_chars} chars/{after_lines} lines). Snapshot included below for model context."
+                    ),
+                    ReadFileSnapshotSummary::Unchanged { .. } => unreachable!(),
+                };
+                format!(
+                    "{summary_message}\nContent for model context:\n--- {path} ---\n{output}\n--- end {path} ---"
+                )
+            }
+        }
     }
 
     fn upsert_turn_block(
@@ -1033,7 +1148,7 @@ fn emit_text_update(
 }
 
 fn structured_blocks_enabled() -> bool {
-    std::env::var("AISTAR_USE_STRUCTURED_BLOCKS")
+    std::env::var("AISTRALIS_USE_STRUCTURED_BLOCKS")
         .ok()
         .and_then(parse_bool_flag)
         .unwrap_or(true)
@@ -1098,19 +1213,19 @@ fn resolve_history_limits(is_local_endpoint: bool) -> HistoryLimits {
 
     HistoryLimits {
         max_assistant_history_chars: env_override_usize(
-            "AISTAR_MAX_ASSISTANT_HISTORY_CHARS",
+            "AISTRALIS_MAX_ASSISTANT_HISTORY_CHARS",
             defaults.max_assistant_history_chars,
             200,
             20_000,
         ),
         max_tool_result_history_chars: env_override_usize(
-            "AISTAR_MAX_TOOL_RESULT_HISTORY_CHARS",
+            "AISTRALIS_MAX_TOOL_RESULT_HISTORY_CHARS",
             defaults.max_tool_result_history_chars,
             200,
             40_000,
         ),
         max_api_messages: env_override_usize(
-            "AISTAR_MAX_API_MESSAGES",
+            "AISTRALIS_MAX_API_MESSAGES",
             defaults.max_api_messages,
             4,
             128,
@@ -1125,7 +1240,7 @@ fn resolve_tool_timeout(is_local_endpoint: bool) -> Duration {
         REMOTE_DEFAULT_TOOL_TIMEOUT_SECS
     };
 
-    let secs = std::env::var("AISTAR_TOOL_TIMEOUT_SECS")
+    let secs = std::env::var("AISTRALIS_TOOL_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(default_secs)
@@ -1135,7 +1250,7 @@ fn resolve_tool_timeout(is_local_endpoint: bool) -> Duration {
 
 fn resolve_max_tool_rounds(is_local_endpoint: bool) -> usize {
     let default_rounds = if is_local_endpoint { 12 } else { 24 };
-    std::env::var("AISTAR_MAX_TOOL_ROUNDS")
+    std::env::var("AISTRALIS_MAX_TOOL_ROUNDS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(default_rounds)
@@ -1167,7 +1282,7 @@ fn required_tool_string<'a>(
 }
 
 fn stream_local_tool_events_enabled() -> bool {
-    std::env::var("AISTAR_STREAM_LOCAL_TOOL_EVENTS")
+    std::env::var("AISTRALIS_STREAM_LOCAL_TOOL_EVENTS")
         .ok()
         .and_then(parse_bool_flag)
         .unwrap_or(false)
@@ -1178,14 +1293,14 @@ fn default_tool_approval_enabled(is_local_endpoint: bool) -> bool {
 }
 
 fn tool_approval_enabled(is_local_endpoint: bool) -> bool {
-    std::env::var("AISTAR_TOOL_CONFIRM")
+    std::env::var("AISTRALIS_TOOL_CONFIRM")
         .ok()
         .and_then(parse_bool_flag)
         .unwrap_or(default_tool_approval_enabled(is_local_endpoint))
 }
 
 fn stream_server_events_enabled() -> bool {
-    std::env::var("AISTAR_STREAM_SERVER_EVENTS")
+    std::env::var("AISTRALIS_STREAM_SERVER_EVENTS")
         .ok()
         .and_then(parse_bool_flag)
         .unwrap_or(true)
@@ -1346,6 +1461,38 @@ fn normalize_tagged_parameter_value(raw: &str) -> String {
     value
 }
 
+fn render_loop_limit_guard_message(last_assistant_text: &str, max_rounds: usize) -> String {
+    render_loop_guard_message(
+        last_assistant_text,
+        format!("Stopped after {max_rounds} tool rounds to prevent an infinite loop."),
+    )
+}
+
+fn render_repeated_tool_guard_message(last_assistant_text: &str) -> String {
+    render_loop_guard_message(
+        last_assistant_text,
+        "Repeated identical read/search tool calls detected; stopped to prevent an infinite loop."
+            .to_string(),
+    )
+}
+
+fn render_missing_tool_evidence_guard_message(last_assistant_text: &str) -> String {
+    render_loop_guard_message(
+        last_assistant_text,
+        "Model did not execute any tool call required to answer this request with workspace evidence."
+            .to_string(),
+    )
+}
+
+fn render_loop_guard_message(last_assistant_text: &str, reason: String) -> String {
+    let summary = if last_assistant_text.trim().is_empty() {
+        "No final assistant answer was produced.".to_string()
+    } else {
+        last_assistant_text.to_string()
+    };
+    format!("{summary}\n\n[loop guard] {reason}")
+}
+
 fn truncate_for_history(text: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -1356,11 +1503,23 @@ fn truncate_for_history(text: &str, max_chars: usize) -> String {
         return text.to_string();
     }
 
-    let indicator = format!("\n...[truncated {} chars]", chars.len() - max_chars);
-    let keep = max_chars.saturating_sub(indicator.chars().count());
-    let mut out: String = chars.into_iter().take(keep).collect();
-    out.push_str(&indicator);
-    out
+    let total = chars.len();
+    let indicator = format!(
+        "\n...[truncated {} chars]...\n",
+        total.saturating_sub(max_chars)
+    );
+    let indicator_len = indicator.chars().count();
+    if indicator_len >= max_chars {
+        return chars.into_iter().take(max_chars).collect();
+    }
+
+    let available = max_chars - indicator_len;
+    let keep_head = available / 2;
+    let keep_tail = available - keep_head;
+
+    let head: String = chars.iter().take(keep_head).collect();
+    let tail: String = chars.iter().skip(total.saturating_sub(keep_tail)).collect();
+    format!("{head}{indicator}{tail}")
 }
 
 fn is_read_only_tool_name(name: &str) -> bool {
@@ -1397,6 +1556,49 @@ mod tests {
     use serde_json::json;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
+
+    fn tagged_read_file_round(message_id: &str) -> Vec<String> {
+        vec![
+            format!(
+                r#"event: message_start
+data: {{"type":"message_start","message":{{"id":"{message_id}","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{{"input_tokens":10,"output_tokens":1}}}}}}"#
+            ),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#
+                .to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I will read it.\n<function=read_file>\n<parameter=path>\nfile.txt\n</parameter>\n</function>"}}"#
+                .to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}"#
+                .to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#
+                .to_string(),
+        ]
+    }
+
+    fn plain_text_round(message_id: &str, text: &str) -> Vec<String> {
+        vec![
+            format!(
+                r#"event: message_start
+data: {{"type":"message_start","message":{{"id":"{message_id}","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{{"input_tokens":10,"output_tokens":1}}}}}}"#
+            ),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#
+                .to_string(),
+            format!(
+                r#"event: content_block_delta
+data: {{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"{text}"}}}}"#
+            ),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":9}}"#
+                .to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#
+                .to_string(),
+        ]
+    }
 
     #[test]
     fn test_read_only_tool_round_helpers() {
@@ -1522,7 +1724,8 @@ data: {"type": "message_stop"}"#.to_string(),
             } = &blocks[0]
             {
                 assert!(content.contains("Read file.txt:"));
-                assert!(content.contains("Full content omitted"));
+                assert!(content.contains("Content for model context:"));
+                assert!(content.contains("Hello from file.txt"));
                 assert!(!is_error);
             }
         }
@@ -1727,7 +1930,20 @@ cal.js
         assert_eq!(truncated, text);
 
         let truncated = truncate_for_history(text, 5);
+        assert!(truncated.len() <= 5);
+
+        let long_text = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let truncated_with_marker = truncate_for_history(long_text, 30);
+        assert!(truncated_with_marker.contains("[truncated"));
+    }
+
+    #[test]
+    fn test_truncate_for_history_preserves_tail_context() {
+        let text = "head-aaaa-bbbb-cccc-dddd-eeee-ffff-gggg-tail";
+        let truncated = truncate_for_history(text, 40);
         assert!(truncated.contains("[truncated"));
+        assert!(truncated.contains("head"));
+        assert!(truncated.contains("tail"));
     }
 
     #[test]
@@ -1751,17 +1967,17 @@ cal.js
     #[test]
     fn test_env_bool_off_is_false_across_state_paths() {
         let _env_lock = crate::test_support::ENV_LOCK.blocking_lock();
-        std::env::set_var("AISTAR_STREAM_LOCAL_TOOL_EVENTS", "off");
-        std::env::set_var("AISTAR_STREAM_SERVER_EVENTS", "off");
-        std::env::set_var("AISTAR_TOOL_CONFIRM", "off");
+        std::env::set_var("AISTRALIS_STREAM_LOCAL_TOOL_EVENTS", "off");
+        std::env::set_var("AISTRALIS_STREAM_SERVER_EVENTS", "off");
+        std::env::set_var("AISTRALIS_TOOL_CONFIRM", "off");
 
         assert!(!stream_local_tool_events_enabled());
         assert!(!stream_server_events_enabled());
         assert!(!tool_approval_enabled(false));
 
-        std::env::remove_var("AISTAR_STREAM_LOCAL_TOOL_EVENTS");
-        std::env::remove_var("AISTAR_STREAM_SERVER_EVENTS");
-        std::env::remove_var("AISTAR_TOOL_CONFIRM");
+        std::env::remove_var("AISTRALIS_STREAM_LOCAL_TOOL_EVENTS");
+        std::env::remove_var("AISTRALIS_STREAM_SERVER_EVENTS");
+        std::env::remove_var("AISTRALIS_TOOL_CONFIRM");
     }
 
     #[test]
@@ -1778,7 +1994,8 @@ cal.js
             &Ok("line1\nline2".to_string()),
         );
         assert!(first.contains("Read cal.rs:"));
-        assert!(first.contains("Full content omitted"));
+        assert!(first.contains("Content for model context:"));
+        assert!(first.contains("line1\nline2"));
 
         let second = manager.format_tool_result_for_history(
             "read_file",
@@ -1793,7 +2010,8 @@ cal.js
             &Ok("line1\nline2 changed".to_string()),
         );
         assert!(third.contains("content changed"));
-        assert!(third.contains("Full content omitted"));
+        assert!(third.contains("Content for model context:"));
+        assert!(third.contains("line1\nline2 changed"));
 
         // After a change the cache must update, so the same content read again
         // must be classified as Unchanged — not another Changed.
@@ -2117,7 +2335,7 @@ data: {"type":"message_stop"}"#.to_string(),
         let mut mock_tool_responses = HashMap::new();
         mock_tool_responses.insert(
             "Cargo.toml".to_string(),
-            "[package]\nname = \"aistar\"".to_string(),
+            "[package]\nname = \"aistralis\"".to_string(),
         );
         let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
 
@@ -2171,11 +2389,24 @@ data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":
             r#"event: message_stop
 data: {"type":"message_stop"}"#.to_string(),
         ];
+        let third_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_retry_once_03","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":8,"output_tokens":2}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#.to_string(),
+            r#"event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Still no tool call."}}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
 
         let mock_api_client =
             ApiClient::new_mock(Arc::new(crate::api::mock_client::MockApiClient::new(vec![
                 first_response_sse,
                 second_response_sse,
+                third_response_sse,
             ])));
         let mut manager = ConversationManager::new_mock(mock_api_client, HashMap::new());
 
@@ -2183,6 +2414,10 @@ data: {"type":"message_stop"}"#.to_string(),
             .send_message("show me the file count".to_string(), None)
             .await?;
         assert!(final_text.contains("Still no tool call."));
+        assert!(
+            final_text.contains("[loop guard]"),
+            "tool-evidence-required prompts must return guard text when model stays toolless"
+        );
 
         let correction_count = manager
             .api_messages
@@ -2196,9 +2431,61 @@ data: {"type":"message_stop"}"#.to_string(),
             })
             .count();
         assert_eq!(
-            correction_count, 1,
-            "retry message should only be inserted once"
+            correction_count, 2,
+            "retry message should be inserted twice"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_repeated_read_only_round_injects_nudge_then_recovers() -> Result<()> {
+        let mock_api_client =
+            ApiClient::new_mock(Arc::new(crate::api::mock_client::MockApiClient::new(vec![
+                tagged_read_file_round("msg_loop_nudge_01"),
+                tagged_read_file_round("msg_loop_nudge_02"),
+                tagged_read_file_round("msg_loop_nudge_03"),
+                plain_text_round("msg_loop_nudge_04", "Done after loop correction."),
+            ])));
+        let mut mock_tool_responses = HashMap::new();
+        mock_tool_responses.insert("file.txt".to_string(), "loop sample".to_string());
+        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+
+        let final_text = manager.send_message("read file".to_string(), None).await?;
+        assert!(final_text.contains("Done after loop correction."));
+
+        let nudge_count = manager
+            .api_messages
+            .iter()
+            .filter(|message| {
+                message.role == "user"
+                    && matches!(
+                        &message.content,
+                        Content::Text(text) if text.contains("Do not repeat identical tool calls")
+                    )
+            })
+            .count();
+        assert_eq!(nudge_count, 1, "expected exactly one loop-correction nudge");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_repeated_read_only_round_returns_guard_message_instead_of_error() -> Result<()> {
+        let mock_api_client =
+            ApiClient::new_mock(Arc::new(crate::api::mock_client::MockApiClient::new(vec![
+                tagged_read_file_round("msg_loop_guard_01"),
+                tagged_read_file_round("msg_loop_guard_02"),
+                tagged_read_file_round("msg_loop_guard_03"),
+                tagged_read_file_round("msg_loop_guard_04"),
+            ])));
+        let mut mock_tool_responses = HashMap::new();
+        mock_tool_responses.insert("file.txt".to_string(), "loop sample".to_string());
+        let mut manager = ConversationManager::new_mock(mock_api_client, mock_tool_responses);
+
+        let final_text = manager.send_message("read file".to_string(), None).await?;
+        assert!(final_text.contains("[loop guard]"));
+        assert!(final_text.contains("Repeated identical read/search tool calls"));
 
         Ok(())
     }
@@ -2345,6 +2632,55 @@ data: {"type":"message_stop"}"#.to_string(),
         assert_eq!(manager.api_messages.len(), 2);
         assert_eq!(manager.api_messages[0].role, "user");
         assert_eq!(manager.api_messages[1].role, "assistant");
+    }
+
+    #[test]
+    fn test_prune_message_history_preserving_keeps_turn_user_anchor() {
+        let mock_api_client = ApiClient::new_mock(Arc::new(
+            crate::api::mock_client::MockApiClient::new(vec![]),
+        ));
+        let mut manager = ConversationManager::new_mock(mock_api_client, HashMap::new());
+
+        manager.api_messages = vec![
+            ApiMessage {
+                role: "user".to_string(),
+                content: Content::Text("anchor user prompt".to_string()),
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: Content::Text("round 1".to_string()),
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: Content::Text("tool_result read_file:\nA".to_string()),
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: Content::Text("round 2".to_string()),
+            },
+            ApiMessage {
+                role: "user".to_string(),
+                content: Content::Text("tool_result read_file:\nB".to_string()),
+            },
+            ApiMessage {
+                role: "assistant".to_string(),
+                content: Content::Text("round 3".to_string()),
+            },
+        ];
+
+        let anchor_index = 0usize;
+        let new_anchor = manager.prune_message_history_preserving(4, anchor_index);
+        assert_eq!(
+            new_anchor, 0,
+            "anchor should be retained at index 0 after pruning"
+        );
+        assert!(
+            matches!(
+                &manager.api_messages.first().map(|m| (&m.role, &m.content)),
+                Some((role, Content::Text(text))) if role.as_str() == "user" && text == "anchor user prompt"
+            ),
+            "turn anchor user prompt must be preserved during loop pruning"
+        );
     }
 
     #[test]

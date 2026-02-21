@@ -1,4 +1,4 @@
-use aistar::config::Config;
+use aistralis::config::Config;
 
 #[test]
 fn test_config_validation_rejects_invalid_models_for_remote_api() {
