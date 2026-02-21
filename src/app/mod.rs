@@ -76,6 +76,7 @@ struct InputState {
     cursor: usize,
     history: Vec<String>,
     history_index: Option<usize>,
+    history_stash: Option<EditorSnapshot>,
     undo_stack: Vec<EditorSnapshot>,
     redo_stack: Vec<EditorSnapshot>,
 }
@@ -575,6 +576,8 @@ impl InputEditor {
     }
 
     fn insert_str(&mut self, value: &str) {
+        self.input_state.history_index = None;
+        self.input_state.history_stash = None;
         let cursor = self.clamp_cursor_to_boundary_left(self.input_state.cursor);
         self.push_undo();
         self.input_state.buffer.insert_str(cursor, value);
@@ -586,6 +589,8 @@ impl InputEditor {
         if end == 0 {
             return;
         }
+        self.input_state.history_index = None;
+        self.input_state.history_stash = None;
         let start = self.prev_char_boundary(end);
         self.push_undo();
         self.input_state.buffer.replace_range(start..end, "");
@@ -597,6 +602,8 @@ impl InputEditor {
         if start >= self.input_state.buffer.len() {
             return;
         }
+        self.input_state.history_index = None;
+        self.input_state.history_stash = None;
         let end = self.next_char_boundary(start);
         self.push_undo();
         self.input_state.buffer.replace_range(start..end, "");
@@ -612,6 +619,7 @@ impl InputEditor {
             .history
             .push(self.input_state.buffer.clone());
         self.input_state.history_index = None;
+        self.input_state.history_stash = None;
         self.push_undo();
         self.input_state.buffer.clear();
         self.input_state.cursor = 0;
@@ -623,6 +631,9 @@ impl InputEditor {
             return;
         }
 
+        if self.input_state.history_index.is_none() {
+            self.input_state.history_stash = Some(self.snapshot());
+        }
         let next_index = match self.input_state.history_index {
             Some(idx) if idx > 0 => idx - 1,
             Some(_) => 0,
@@ -640,8 +651,12 @@ impl InputEditor {
 
         if idx + 1 >= self.input_state.history.len() {
             self.input_state.history_index = None;
-            self.input_state.buffer.clear();
-            self.input_state.cursor = 0;
+            if let Some(stash) = self.input_state.history_stash.take() {
+                self.restore(stash);
+            } else {
+                self.input_state.buffer.clear();
+                self.input_state.cursor = 0;
+            }
         } else {
             let next = idx + 1;
             self.input_state.history_index = Some(next);
@@ -1415,6 +1430,62 @@ mod tests {
     }
 
     #[test]
+    fn history_stable_during_overlay() {
+        let mut mode = TuiMode::new();
+        let mut ctx = setup_ctx();
+        let mut editor = InputEditor::new();
+
+        editor.input_state.buffer = "first".to_string();
+        let _ = editor.submit();
+        editor.input_state.buffer = "second".to_string();
+        let _ = editor.submit();
+        editor.input_state.buffer = "draft".to_string();
+        editor.input_state.cursor = editor.input_state.buffer.len();
+
+        editor.history_up();
+        let before_overlay_buffer = editor.input_state.buffer.clone();
+        let before_overlay_index = editor.input_state.history_index;
+        let before_overlay_history_len = editor.input_state.history.len();
+
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<bool>();
+        mode.overlay_state.pending_approval = Some(PendingApproval {
+            tool_name: "read_file".to_string(),
+            input_preview: "{}".to_string(),
+            response_tx,
+        });
+        assert!(mode.overlay_active());
+
+        let up =
+            overlay_event_to_user_input(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        let down = overlay_event_to_user_input(Event::Key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert!(
+            up.is_none(),
+            "overlay keymap must consume history navigation"
+        );
+        assert!(
+            down.is_none(),
+            "overlay keymap must consume history navigation"
+        );
+
+        assert_eq!(editor.input_state.buffer, before_overlay_buffer);
+        assert_eq!(editor.input_state.history_index, before_overlay_index);
+        assert_eq!(editor.input_state.history.len(), before_overlay_history_len);
+
+        mode.on_user_input("1".to_string(), &mut ctx);
+        assert!(!mode.overlay_active(), "overlay should clear on decision");
+
+        editor.history_down();
+        assert_eq!(editor.input_state.history_index, None);
+        assert_eq!(
+            editor.input_state.buffer, "draft",
+            "prompt draft must restore after overlay transition"
+        );
+    }
+
+    #[test]
     fn input_pane_expands_then_clamps_to_max_rows() {
         assert_eq!(input_rows_for_buffer("", 80), 1);
 
@@ -1454,6 +1525,28 @@ mod tests {
         assert_eq!(editor.input_state.buffer, "first");
         editor.apply_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(editor.input_state.buffer, "second");
+    }
+
+    #[test]
+    fn test_editor_history_stash_restore() {
+        let mut editor = InputEditor::new();
+
+        editor.input_state.buffer = "first".to_string();
+        let _ = editor.submit();
+        editor.input_state.buffer = "second".to_string();
+        let _ = editor.submit();
+
+        editor.input_state.buffer = "draft".to_string();
+        editor.input_state.cursor = editor.input_state.buffer.len();
+
+        editor.history_up();
+        assert_eq!(editor.input_state.buffer, "second");
+        assert_eq!(editor.input_state.history_index, Some(1));
+
+        editor.history_down();
+        assert_eq!(editor.input_state.history_index, None);
+        assert_eq!(editor.input_state.buffer, "draft");
+        assert_eq!(editor.input_state.cursor, "draft".len());
     }
 
     #[test]
