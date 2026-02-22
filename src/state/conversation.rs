@@ -525,6 +525,27 @@ impl ConversationManager {
             let mut text_protocol_tool_results = Vec::new();
             for block in tool_use_blocks {
                 if let ContentBlock::ToolUse { id, name, input } = block {
+                    if let Some(clarification) = missing_mutating_location_prompt(&name, &input) {
+                        if use_structured_blocks {
+                            self.set_tool_call_status(&id, ToolStatus::Cancelled, stream_delta_tx);
+                            self.push_tool_result_block(
+                                StreamBlock::ToolResult {
+                                    tool_call_id: id.clone(),
+                                    output: clarification.clone(),
+                                    is_error: true,
+                                },
+                                stream_delta_tx,
+                            );
+                        } else if stream_local_tool_events {
+                            emit_text_update(
+                                stream_delta_tx,
+                                format!("\n- [tool_error] {name}: {clarification}\n"),
+                            );
+                        }
+                        emit_text_update(stream_delta_tx, clarification.clone());
+                        return Ok(clarification);
+                    }
+
                     let tool_requires_approval =
                         require_tool_approval || tool_requires_confirmation(&name);
 
@@ -1360,6 +1381,38 @@ fn required_tool_string_any<'a>(
     Ok(value)
 }
 
+fn missing_mutating_location_prompt(name: &str, input: &serde_json::Value) -> Option<String> {
+    let missing =
+        |keys: &[&str]| first_tool_string(input, keys).is_none_or(|value| value.trim().is_empty());
+
+    match name {
+        "write_file" => {
+            if missing(&["path", "file_path", "file", "filename"]) {
+                Some("I need the target file path before creating a file. Please provide an explicit path like `src/calculator.rs`. No file changes were made.".to_string())
+            } else {
+                None
+            }
+        }
+        "edit_file" => {
+            if missing(&["path", "file_path", "file", "filename"]) {
+                Some("I need the target file path before editing a file. Please provide an explicit path like `src/calculator.rs`. No file changes were made.".to_string())
+            } else {
+                None
+            }
+        }
+        "rename_file" => {
+            if missing(&["old_path", "from", "source_path"])
+                || missing(&["new_path", "to", "target_path"])
+            {
+                Some("I need both source and destination file paths before renaming. Please provide `old_path` and `new_path`. No file changes were made.".to_string())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn stream_local_tool_events_enabled() -> bool {
     std::env::var("VEX_STREAM_LOCAL_TOOL_EVENTS")
         .ok()
@@ -2084,6 +2137,32 @@ cal.js
     }
 
     #[test]
+    fn test_missing_mutating_location_prompt_requires_explicit_paths() {
+        let edit_missing = json!({
+            "old_str": "a",
+            "new_str": "b"
+        });
+        let edit_with_path = json!({
+            "file_path": "src/calculator.rs",
+            "old_str": "a",
+            "new_str": "b"
+        });
+        let rename_missing = json!({
+            "old_path": "src/a.rs"
+        });
+        let rename_ready = json!({
+            "from": "src/a.rs",
+            "to": "src/b.rs"
+        });
+
+        assert!(missing_mutating_location_prompt("edit_file", &edit_missing).is_some());
+        assert!(missing_mutating_location_prompt("edit_file", &edit_with_path).is_none());
+        assert!(missing_mutating_location_prompt("rename_file", &rename_missing).is_some());
+        assert!(missing_mutating_location_prompt("rename_file", &rename_ready).is_none());
+        assert!(missing_mutating_location_prompt("read_file", &json!({"path":"x"})).is_none());
+    }
+
+    #[test]
     fn test_env_bool_off_is_false_across_state_paths() {
         let _env_lock = crate::test_support::ENV_LOCK.blocking_lock();
         std::env::set_var("VEX_STREAM_LOCAL_TOOL_EVENTS", "off");
@@ -2381,6 +2460,35 @@ data: {"type":"message_stop"}"#.to_string(),
 
         std::env::remove_var("VEX_TOOL_CONFIRM");
         assert!(saw_approval_request);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_edit_file_missing_path_returns_clarification_instead_of_looping() -> Result<()> {
+        let first_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_missing_path_01","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_missing_path_01","name":"edit_file","input":{"old_text":"x","new_text":"y"}}}"#.to_string(),
+            r#"event: content_block_stop
+data: {"type":"content_block_stop","index":0}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+
+        let mock_api_client =
+            ApiClient::new_mock(Arc::new(crate::api::mock_client::MockApiClient::new(vec![
+                first_response_sse,
+            ])));
+        let mut manager = ConversationManager::new_mock(mock_api_client, HashMap::new());
+
+        let final_text = manager
+            .send_message("please edit".to_string(), None)
+            .await?;
+        assert!(final_text.contains("target file path"));
+        assert!(final_text.contains("No file changes were made"));
         Ok(())
     }
 

@@ -371,6 +371,24 @@ for the exact commit that closes the checklist item.
   - Updated tool preview rendering to surface those alias fields in the overlay so users can verify real payloads before approval.
   - Added a mutating-tool loop guard that stops repeated identical `edit_file`/write-like calls and returns a loop-guard message instead of spinning through repeated approvals.
 
+### Tool Evidence Follow-up - Clarify missing file location and stop repeated prompt churn
+- Dispatcher: codex-gpt5
+- Commit: pending (pre-commit review requested)
+- Files changed:
+  - `src/state/conversation.rs` (+108 -0)
+- Line references:
+  - `src/state/conversation.rs:528`
+  - `src/state/conversation.rs:1384`
+  - `src/state/conversation.rs:2140`
+  - `src/state/conversation.rs:2467`
+- Validation:
+  - `cargo test --all-targets` : pass
+  - `cargo clippy --all-targets -- -D warnings` : pass
+- Notes:
+  - Added an early mutating-tool location guard that checks for explicit file path/location fields before executing `write_file`/`edit_file`/`rename_file`.
+  - When location is missing, runtime now returns a direct clarification request ("provide target file path") and exits the turn instead of re-entering repeated tool-call cycles.
+  - This ensures the user is explicitly asked for edit/create location before any file mutation is attempted.
+
 ## Gating rules
 
 1. Phase 2 cannot start before U4 + D1 are merged and green.
