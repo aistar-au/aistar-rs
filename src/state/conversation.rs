@@ -1121,9 +1121,10 @@ fn execute_tool_dispatch(
             let path =
                 required_tool_string_any(input, name, "path", &["path", "file_path", "file"])?;
             let content = first_tool_string(input, &["content", "text"]).unwrap_or("");
+            let (chars, lines) = text_stats(content);
             tool_operator
                 .write_file(path, content)
-                .map(|_| format!("Successfully wrote to {path}"))
+                .map(|_| format!("Wrote {path} ({chars} chars, {lines} lines)."))
         }
         "edit_file" => {
             let path = required_tool_string_any(
@@ -1132,7 +1133,7 @@ fn execute_tool_dispatch(
                 "path",
                 &["path", "file_path", "file", "filename"],
             )?;
-            let old_str = required_tool_string_any(
+            let old_str = required_tool_string_any_preserve(
                 input,
                 name,
                 "old_str",
@@ -1150,9 +1151,24 @@ fn execute_tool_dispatch(
                 ],
             )
             .unwrap_or("");
+            let (old_chars, old_lines) = text_stats(old_str);
+            let (new_chars, new_lines) = text_stats(new_str);
+            let summary = if old_lines > 0 && new_lines == 0 {
+                format!(
+                    "Deleted snippet in {path} ({old_chars} chars/{old_lines} lines -> {new_chars} chars/{new_lines} lines)."
+                )
+            } else if old_lines == 0 && new_lines > 0 {
+                format!(
+                    "Inserted snippet in {path} ({old_chars} chars/{old_lines} lines -> {new_chars} chars/{new_lines} lines)."
+                )
+            } else {
+                format!(
+                    "Updated snippet in {path} ({old_chars} chars/{old_lines} lines -> {new_chars} chars/{new_lines} lines)."
+                )
+            };
             tool_operator
                 .edit_file(path, old_str, new_str)
-                .map(|_| format!("Successfully edited {path}"))
+                .map(|_| summary)
         }
         "rename_file" => {
             let old_path = required_tool_string_any(
@@ -1381,6 +1397,19 @@ fn required_tool_string_any<'a>(
     Ok(value)
 }
 
+fn required_tool_string_any_preserve<'a>(
+    input: &'a serde_json::Value,
+    tool: &str,
+    canonical_key: &str,
+    keys: &[&str],
+) -> Result<&'a str> {
+    let value = first_tool_string(input, keys).unwrap_or("");
+    if value.is_empty() {
+        bail!("{tool} requires a non-empty '{canonical_key}' string argument");
+    }
+    Ok(value)
+}
+
 fn missing_mutating_location_prompt(name: &str, input: &serde_json::Value) -> Option<String> {
     let missing =
         |keys: &[&str]| first_tool_string(input, keys).is_none_or(|value| value.trim().is_empty());
@@ -1411,6 +1440,13 @@ fn missing_mutating_location_prompt(name: &str, input: &serde_json::Value) -> Op
         }
         _ => None,
     }
+}
+
+fn text_stats(text: &str) -> (usize, usize) {
+    (
+        text.chars().count(),
+        text.lines().count().max(usize::from(!text.is_empty())),
+    )
 }
 
 fn stream_local_tool_events_enabled() -> bool {
@@ -2891,7 +2927,7 @@ data: {"type":"message_stop"}"#.to_string(),
         std::fs::create_dir_all(target.parent().expect("target parent exists"))?;
         std::fs::write(&target, "pub fn calc() -> i32 { 1 }\n")?;
 
-        manager
+        let result = manager
             .execute_tool(
                 "edit_file",
                 &json!({
@@ -2901,9 +2937,39 @@ data: {"type":"message_stop"}"#.to_string(),
                 }),
             )
             .await?;
+        assert!(result.contains("Updated snippet in src/calculator.rs"));
 
         let updated = std::fs::read_to_string(&target)?;
         assert!(updated.contains("2"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_edit_file_delete_summary_is_clear() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mock_api_client = ApiClient::new_mock(Arc::new(
+            crate::api::mock_client::MockApiClient::new(vec![]),
+        ));
+        let executor = ToolOperator::new(temp.path().to_path_buf());
+        let manager = ConversationManager::new(mock_api_client, executor);
+
+        let target = temp.path().join("src").join("calculator.rs");
+        std::fs::create_dir_all(target.parent().expect("target parent exists"))?;
+        std::fs::write(&target, "pub fn sqrt() {}\n// keep\n")?;
+
+        let result = manager
+            .execute_tool(
+                "edit_file",
+                &json!({
+                    "path": "src/calculator.rs",
+                    "old_str": "pub fn sqrt() {}\n",
+                    "new_str": ""
+                }),
+            )
+            .await?;
+
+        assert!(result.contains("Deleted snippet in src/calculator.rs"));
+        assert_eq!(std::fs::read_to_string(&target)?, "// keep\n");
         Ok(())
     }
 

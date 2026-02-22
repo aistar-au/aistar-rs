@@ -389,6 +389,36 @@ for the exact commit that closes the checklist item.
   - When location is missing, runtime now returns a direct clarification request ("provide target file path") and exits the turn instead of re-entering repeated tool-call cycles.
   - This ensures the user is explicitly asked for edit/create location before any file mutation is attempted.
 
+### UX Follow-up - Clear mutation summaries and viewport-aware rendering
+- Dispatcher: codex-gpt5
+- Commit: pending (pre-commit review requested)
+- Files changed:
+  - `src/app.rs` (+35 -4)
+  - `src/runtime/policy.rs` (+4 -1)
+  - `src/state/conversation.rs` (+70 -4)
+  - `src/ui/render.rs` (+46 -11)
+- Line references:
+  - `src/app.rs:192`
+  - `src/app.rs:526`
+  - `src/app.rs:587`
+  - `src/runtime/policy.rs:24`
+  - `src/runtime/policy.rs:51`
+  - `src/state/conversation.rs:1127`
+  - `src/state/conversation.rs:1158`
+  - `src/state/conversation.rs:1400`
+  - `src/state/conversation.rs:2948`
+  - `src/ui/render.rs:77`
+  - `src/ui/render.rs:135`
+  - `src/ui/render.rs:294`
+- Validation:
+  - `cargo test --all-targets` : pass
+  - `cargo clippy --all-targets -- -D warnings` : pass
+- Notes:
+  - Mutation tool results now explicitly report inserted/updated/deleted snippet summaries with char/line deltas, improving clarity after edit operations.
+  - Tool approval history entries are now summarized (path + change/content context) instead of dumping noisy multiline payloads into a single status line.
+  - History rendering now wraps long lines to available pane width so content is no longer cut off by window aspect ratio.
+  - Tool-evidence hint matching was expanded (`what is in`, `read it again`, `read again`) to reduce repeated non-tool answers for file-content follow-ups.
+
 ## Gating rules
 
 1. Phase 2 cannot start before U4 + D1 are merged and green.

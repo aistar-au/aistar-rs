@@ -189,7 +189,7 @@ impl TuiMode {
             .overlay_state
             .pending_approval
             .as_ref()
-            .map(|p| format!("{} {}", p.tool_name, p.input_preview))
+            .map(|p| summarize_tool_approval_context(&p.tool_name, &p.input_preview))
             .unwrap_or_else(|| "unknown".to_string());
         match normalized.as_str() {
             "1" | "y" | "yes" => {
@@ -523,9 +523,8 @@ impl RuntimeMode for TuiMode {
 
                 self.resolve_pending_approval(false);
                 self.resolve_pending_patch_approval(false);
-                self.push_history_line(format!(
-                    "[tool approval requested: {tool_name}] {input_preview}"
-                ));
+                let summary = summarize_tool_approval_context(&tool_name, &input_preview);
+                self.push_history_line(format!("[tool approval requested: {summary}]"));
                 self.overlay_state.pending_approval = Some(PendingApproval {
                     tool_name,
                     input_preview,
@@ -582,6 +581,38 @@ impl RuntimeMode for TuiMode {
 
     fn is_turn_in_progress(&self) -> bool {
         self.history_state.turn_in_progress
+    }
+}
+
+fn summarize_tool_approval_context(tool_name: &str, input_preview: &str) -> String {
+    let mut path: Option<&str> = None;
+    let mut summary_line: Option<&str> = None;
+
+    for line in input_preview.lines().take(8) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if path.is_none() && trimmed.starts_with("path:") {
+            path = Some(trimmed);
+            continue;
+        }
+        if summary_line.is_none()
+            && (trimmed.starts_with("change:") || trimmed.starts_with("content:"))
+        {
+            summary_line = Some(trimmed);
+            continue;
+        }
+        if summary_line.is_none() {
+            summary_line = Some(trimmed);
+        }
+    }
+
+    match (path, summary_line) {
+        (Some(path), Some(summary)) => format!("{tool_name} {path} {summary}"),
+        (Some(path), None) => format!("{tool_name} {path}"),
+        (None, Some(summary)) => format!("{tool_name} {summary}"),
+        (None, None) => tool_name.to_string(),
     }
 }
 

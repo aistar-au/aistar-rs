@@ -80,13 +80,26 @@ pub fn render_messages(frame: &mut Frame<'_>, area: Rect, messages: &[String], s
     }
     let inner = area;
 
-    let rows = expand_history_rows(messages);
-    let line_number_width = rows.len().max(1).to_string().len();
-    let body: Vec<Line<'static>> = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| format_history_row(index + 1, line_number_width, row))
-        .collect();
+    let logical_rows = expand_history_rows(messages);
+    let line_number_width = logical_rows.len().max(1).to_string().len();
+    let content_width = inner
+        .width
+        .saturating_sub((line_number_width + 3) as u16)
+        .max(1) as usize;
+    let mut body: Vec<Line<'static>> = Vec::new();
+    for (index, row) in logical_rows.iter().enumerate() {
+        let row_style = history_row_style(row);
+        let wrapped_segments = wrap_input_lines(row, content_width);
+        for (segment_index, segment) in wrapped_segments.iter().enumerate() {
+            body.push(format_history_row_segment(
+                index + 1,
+                line_number_width,
+                segment,
+                row_style,
+                segment_index == 0,
+            ));
+        }
+    }
 
     let paragraph =
         Paragraph::new(Text::from(body)).scroll((scroll.min(u16::MAX as usize) as u16, 0));
@@ -119,9 +132,18 @@ fn expand_history_rows(messages: &[String]) -> Vec<String> {
     rows
 }
 
-fn format_history_row(line_number: usize, line_number_width: usize, row: &str) -> Line<'static> {
-    let line_prefix = format!("{line_number:>line_number_width$} | ");
-    let style = history_row_style(row);
+fn format_history_row_segment(
+    line_number: usize,
+    line_number_width: usize,
+    row: &str,
+    style: Style,
+    show_line_number: bool,
+) -> Line<'static> {
+    let line_prefix = if show_line_number {
+        format!("{line_number:>line_number_width$} | ")
+    } else {
+        format!("{:>line_number_width$} | ", "")
+    };
     Line::from(vec![
         Span::styled(
             line_prefix,
@@ -261,8 +283,21 @@ fn modal_content(
                 "Preview",
                 Style::default().add_modifier(Modifier::BOLD),
             ));
-            for line in input_preview.lines().take(6) {
+            let preview_lines: Vec<&str> = input_preview.lines().collect();
+            let max_preview_lines = 6;
+            for line in preview_lines.iter().take(max_preview_lines) {
                 body.push(Line::from(line.to_string()));
+            }
+            if preview_lines.len() > max_preview_lines {
+                body.push(Line::styled(
+                    format!(
+                        "... ({} more lines)",
+                        preview_lines.len() - max_preview_lines
+                    ),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::DIM),
+                ));
             }
             (
                 "Tool Permission",

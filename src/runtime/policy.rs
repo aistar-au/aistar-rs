@@ -21,7 +21,7 @@ const REPEATED_TOOL_ROUND_INSTRUCTION: &str =
 Do not repeat identical tool calls. Use existing tool results to answer now. \
 Only call a different tool if new evidence is required.";
 
-const TOOL_REQUIRED_HINTS: [&str; 26] = [
+const TOOL_REQUIRED_HINTS: [&str; 29] = [
     "file",
     "files",
     "directory",
@@ -48,6 +48,9 @@ const TOOL_REQUIRED_HINTS: [&str; 26] = [
     "content of",
     "what's in",
     "whats in",
+    "what is in",
+    "read it again",
+    "read again",
 ];
 
 pub fn default_runtime_policy() -> DefaultRuntimeCorePolicy {
