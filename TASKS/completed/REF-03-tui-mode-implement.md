@@ -2,7 +2,7 @@
 
 **Status:** Blocked on REF-02  
 **Date:** 2026-02-18  
-**ADR:** [`docs/adr/ADR-006-runtime-mode-contracts.md`](../docs/adr/ADR-006-runtime-mode-contracts.md)  
+**ADR:** [`TASKS/completed/ADR-006-runtime-mode-contracts.md`](ADR-006-runtime-mode-contracts.md)  
 **Depends on:** REF-02 (`test_ref_02_runtime_types_compile` must be green)  
 **Blocks:** REF-04
 

@@ -14,7 +14,7 @@ Refer to CONTRIBUTING.md.
 I am assigning you Task REF-02.
 
 Read TASKS/REF-02-runtime-mode-contract.md.
-Read docs/adr/ADR-006-runtime-mode-contracts.md for full context on the contract shapes.
+Read TASKS/completed/ADR-006-runtime-mode-contracts.md for full context on the contract shapes.
 
 Create the stub types exactly as specified in the task manifest.
 Do not add logic or modify src/app/mod.rs.
@@ -33,7 +33,7 @@ Refer to CONTRIBUTING.md.
 I am assigning you Task REF-03.
 
 Read TASKS/REF-03-tui-mode-implement.md.
-Read docs/adr/ADR-006-runtime-mode-contracts.md — specifically the TuiMode section and the CORE-10/CORE-11 requirements.
+Read TASKS/completed/ADR-006-runtime-mode-contracts.md — specifically the TuiMode section and the CORE-10/CORE-11 requirements.
 
 Your only target file is src/app/mod.rs. Do not create new files.
 Add TuiMode, HistoryState, InputState, OverlayState, OverlayKind, and implement RuntimeMode for TuiMode exactly as specified.
@@ -53,7 +53,7 @@ Refer to CONTRIBUTING.md.
 I am assigning you Task REF-04.
 
 Read TASKS/REF-04-runtime-context-start-turn.md.
-Read docs/adr/ADR-006-runtime-mode-contracts.md — specifically the RuntimeContext section.
+Read TASKS/completed/ADR-006-runtime-mode-contracts.md — specifically the RuntimeContext section.
 
 Your target files are src/runtime/context.rs, src/app/mod.rs (call sites only), and tests/ref_04_start_turn.rs (new file).
 Implement RuntimeContext::start_turn and RuntimeContext::cancel_turn as specified.
@@ -76,7 +76,7 @@ src/
   runtime/          (REF-02 creates this; REF-04 edits context.rs)
   app/mod.rs        (REF-03 and REF-04 call sites)
 tests/              (REF-04 creates ref_04_start_turn.rs)
-docs/adr/           (read-only reference)
+TASKS/completed/           (read-only reference)
 TASKS/              (read-only reference)
 CONTRIBUTING.md     (read-only reference)
 ```
@@ -85,13 +85,13 @@ In a CLI agent session:
 ```bash
 # REF-02
 aider src/runtime.rs \
-  --read docs/adr/ADR-006-runtime-mode-contracts.md \
+  --read TASKS/completed/ADR-006-runtime-mode-contracts.md \
   --read TASKS/REF-02-runtime-mode-contract.md \
   --read CONTRIBUTING.md
 
 # REF-03
 aider src/app/mod.rs \
-  --read docs/adr/ADR-006-runtime-mode-contracts.md \
+  --read TASKS/completed/ADR-006-runtime-mode-contracts.md \
   --read TASKS/REF-03-tui-mode-implement.md \
   --read CONTRIBUTING.md \
   --read src/runtime/mode.rs \
@@ -99,7 +99,7 @@ aider src/app/mod.rs \
 
 # REF-04
 aider src/runtime/context.rs src/app/mod.rs tests/ref_04_start_turn.rs \
-  --read docs/adr/ADR-006-runtime-mode-contracts.md \
+  --read TASKS/completed/ADR-006-runtime-mode-contracts.md \
   --read TASKS/REF-04-runtime-context-start-turn.md \
   --read CONTRIBUTING.md \
   --read src/runtime/mod.rs
@@ -110,21 +110,21 @@ Alternative wrapper style:
 # REF-02
 agent-cli "Refer to CONTRIBUTING.md. I am assigning you Task REF-02. \
 Read TASKS/REF-02-runtime-mode-contract.md and \
-docs/adr/ADR-006-runtime-mode-contracts.md. \
+TASKS/completed/ADR-006-runtime-mode-contracts.md. \
 Create the stub types as specified. \
 Anchor: cargo test test_ref_02_runtime_types_compile"
 
 # REF-03
 agent-cli "Refer to CONTRIBUTING.md. I am assigning you Task REF-03. \
 Read TASKS/REF-03-tui-mode-implement.md and \
-docs/adr/ADR-006-runtime-mode-contracts.md. \
+TASKS/completed/ADR-006-runtime-mode-contracts.md. \
 Implement TuiMode in src/app/mod.rs as specified. \
 Anchor: cargo test test_ref_03_tui_mode_overlay_blocks_input"
 
 # REF-04
 agent-cli "Refer to CONTRIBUTING.md. I am assigning you Task REF-04. \
 Read TASKS/REF-04-runtime-context-start-turn.md and \
-docs/adr/ADR-006-runtime-mode-contracts.md. \
+TASKS/completed/ADR-006-runtime-mode-contracts.md. \
 Implement RuntimeContext::start_turn and ::cancel_turn. \
 Remove old dispatch call sites in src/app/mod.rs as directed. \
 Anchor: cargo test test_ref_04_start_turn_dispatches_message"
@@ -141,5 +141,5 @@ Anchor: cargo test test_ref_04_start_turn_dispatches_message"
 | REF-04 | `cargo test test_ref_04_start_turn_dispatches_message` | REF-02, REF-03 anchors |
 
 REF-05 (generic `Runtime<M>` loop) and REF-06 (`TuiFrontend` adapter) follow the
-same pattern. Read `docs/adr/ADR-006-runtime-mode-contracts.md` §5 for their
+same pattern. Read `TASKS/completed/ADR-006-runtime-mode-contracts.md` §5 for their
 scope, then create the manifest files in `TASKS/` before dispatching.

@@ -90,13 +90,14 @@ Current highlights include:
 - Full runtime seam/cutover track:
   `REF-02` through `REF-08` are archived in `TASKS/completed/`.
 - REF-08 delta documentation is archived at
-  `TASKS/completed/REF-08-deltas/` (working copy under `docs/dev/ref-08/`).
+  `TASKS/completed/REF-08-deltas/` (working copy under
+  `TASKS/completed/REF-08-working-copy/`).
 
 If new work is opened, create manifests in `TASKS/` root first, then promote to
 `TASKS/completed/` after verification.
 
 If the work item is an ADR dispatch, keep it in `TASKS/ADR-XXX-*.md` while open.
-After acceptance, keep the long-term architecture record in `docs/adr/`.
+After acceptance, move the record to `TASKS/completed/ADR-XXX-*.md`.
 
 ## 🔒 Security Design: Lexical + Canonical Guard
 In **SEC-01**, we avoid using `std::fs::canonicalize()` on non-existent target paths, but we do use canonicalization for guard checks on existing paths.

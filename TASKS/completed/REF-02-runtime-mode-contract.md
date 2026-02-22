@@ -2,7 +2,7 @@
 
 **Status:** Active  
 **Date:** 2026-02-18  
-**ADR:** [`docs/adr/ADR-006-runtime-mode-contracts.md`](../docs/adr/ADR-006-runtime-mode-contracts.md)  
+**ADR:** [`TASKS/completed/ADR-006-runtime-mode-contracts.md`](ADR-006-runtime-mode-contracts.md)  
 **Depends on:** Nothing (first in REF track)  
 **Blocks:** REF-03
 

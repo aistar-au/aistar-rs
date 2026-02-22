@@ -3,7 +3,7 @@
 **Date:** 2026-02-18  
 **Status:** Accepted  
 **Deciders:** Core maintainer  
-**Related tasks:** All `TASKS/` files inherit this decision. See `docs/dev/manifest-strategy.md` for the operational guide.
+**Related tasks:** All `TASKS/` files inherit this decision. See `TASKS/manifest-strategy.md` for the operational guide.
 
 ---
 

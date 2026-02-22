@@ -1,6 +1,6 @@
 # Task CRIT-18: Local Tool-Loop Enrichment Consistency
 
-**Target File:** `src/api/client.rs`, `src/state/conversation.rs`, `docs/adr/ADR-015-local-endpoint-text-protocol-default.md`
+**Target File:** `src/api/client.rs`, `src/state/conversation.rs`, `TASKS/completed/ADR-015-local-endpoint-text-protocol-default.md`
 
 **ADR:** ADR-015, ADR-014, ADR-007
 

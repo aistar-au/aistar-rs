@@ -1,0 +1,84 @@
+name: docs-build-and-deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "scripts/generate-docs.sh"
+      - ".github/workflows/docs-build-and-deploy.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "scripts/generate-docs.sh"
+      - ".github/workflows/docs-build-and-deploy.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.93.1
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+
+      - name: Install Node.js 24.13.0
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.13.0"
+
+      - name: Install mdBook 0.5.0
+        run: cargo install mdbook --version 0.5.0 --locked
+
+      - name: Install terraform-docs 0.20.0
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/terraform-docs/terraform-docs/releases/download/v0.20.0/terraform-docs-v0.20.0-linux-amd64.tar.gz" \
+            | tar -xz terraform-docs
+          sudo mv terraform-docs /usr/local/bin/terraform-docs
+
+      - name: Install helm-docs 1.14.2
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/norwoodj/helm-docs/releases/download/v1.14.2/helm-docs_1.14.2_Linux_x86_64.tar.gz" \
+            | tar -xz helm-docs
+          sudo mv helm-docs /usr/local/bin/helm-docs
+
+      - name: Generate docs inputs
+        run: |
+          set -euo pipefail
+          if [ -f scripts/generate-docs.sh ]; then
+            bash scripts/generate-docs.sh
+          fi
+
+      - name: Build docs
+        run: mdbook build docs
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

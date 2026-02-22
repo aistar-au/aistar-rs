@@ -62,9 +62,9 @@ Until CORE-17 gates are green, ADR-017 remains operational.
 
 On acceptance of ADR-018 and successful CORE-17 cutover:
 
-1. Mark `docs/adr/superseded/ADR-017-append-terminal-single-session.md` as
+1. Mark `TASKS/completed/ADR-017-append-terminal-single-session.md` as
    `Superseded by ADR-018`.
-2. Update `docs/adr/README.md` status row for ADR-017 accordingly.
+2. Update `TASKS/ADR-README.md` status row for ADR-017 accordingly.
 3. Keep ADR-017 in history (do not delete).
 
 ## Consequences

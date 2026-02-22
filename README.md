@@ -52,3 +52,13 @@ cargo run
 - `/repo`
 - `/ps`
 - `/quit`
+
+## Documentation
+
+This repository uses mdBook + GitHub Pages for documentation.
+
+- Config: `docs/book.toml`
+- Pages: `docs/src/`
+- Build locally: `mdbook build docs`
+
+ADR files are stored under `TASKS/`, not under `docs/`.

@@ -4,7 +4,7 @@ This directory captures the reviewed REF-08 cutover deltas that were staged in
 `/tmp` and reconciled with the merged branch state.
 
 **Archive status:** Completed and archived under `TASKS/completed/`.
-**Working copy:** `docs/dev/ref-08/`.
+**Working copy:** `TASKS/completed/REF-08-working-copy/`.
 **Consistency baseline:** ADR-008 and ADR-012.
 
 ## Delta index

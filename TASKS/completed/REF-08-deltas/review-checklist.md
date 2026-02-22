@@ -11,7 +11,7 @@
 4. `src/runtime/loop.rs`
 5. `src/runtime/mode.rs`
 6. `src/test_support.rs`
-7. REF-08 docs under `docs/dev/ref-08/`
+7. REF-08 docs under `TASKS/completed/REF-08-working-copy/`
 
 ## Verify behavior
 

@@ -15,7 +15,7 @@
 5. `scripts/check_no_alternate_routing.sh` (new)
 6. `scripts/check_forbidden_imports.sh` (new)
 7. `.github/workflows/arch-contracts.yml` (new)
-8. `docs/adr/` updates
+8. `TASKS/ADR-*` and `TASKS/completed/ADR-*` updates
 
 ## Problem Statement
 
@@ -64,7 +64,7 @@ Authoritative archived delta records:
 
 Working references (mirrored copy):
 
-1. `docs/dev/ref-08/`
+1. `TASKS/completed/REF-08-working-copy/`
 
 ## Notes
 

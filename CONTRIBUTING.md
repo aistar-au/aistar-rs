@@ -1,7 +1,7 @@
 # Contributing to vexcoder
 
 > **Version:** This workflow applies from `v0.1.0-alpha` onward.  
-> **Architecture decisions** live in [`docs/adr/`](docs/adr/README.md).  
+> **Architecture decisions** live in [`TASKS/`](TASKS/ADR-README.md).  
 > **Dispatch ADRs not yet completed** live in [`TASKS/`](TASKS/README.md) as `TASKS/ADR-XXX-*.md`.  
 > The ADRs explain *why* the project is structured this way. Read them before opening a PR.
 
@@ -9,7 +9,7 @@
 
 ## 🛠️ The Agentic Workflow (Test-Driven Manifest)
 
-`vexcoder` uses the **Test-Driven Manifest (TDM)** strategy for all bug fixes, features, and refactors. The full rationale is in [ADR-001](docs/adr/ADR-001-tdm-agentic-manifest-strategy.md). The short version:
+`vexcoder` uses the **Test-Driven Manifest (TDM)** strategy for all bug fixes, features, and refactors. The full rationale is in [ADR-001](TASKS/completed/ADR-001-tdm-agentic-manifest-strategy.md). The short version:
 
 1. **Identify task** — Check `TASKS/` for open items.
    - This includes active dispatch ADR manifests (`TASKS/ADR-XXX-*.md`).
@@ -27,7 +27,7 @@ Architecture gates enforcing ADR-007 must remain green:
 `bash scripts/check_forbidden_imports.sh`
 Tests that mutate process environment variables must hold `crate::test_support::ENV_LOCK`; `cargo test --all-targets` must pass without `--test-threads=1`.
 
-See [`docs/dev/manifest-strategy.md`](docs/dev/manifest-strategy.md) for the operational guide.
+See [`TASKS/manifest-strategy.md`](TASKS/manifest-strategy.md) for the operational guide.
 
 ---
 
@@ -116,21 +116,14 @@ bash scripts/check_forbidden_imports.sh
 vexcoder/
 ├── CONTRIBUTING.md                # This file — TDM law
 ├── docs/
-│   ├── adr/                       # Architecture Decision Records (why)
-│   │   ├── README.md
-│   │   ├── ADR-001-tdm-agentic-manifest-strategy.md
-│   │   ├── ADR-002-lexical-path-normalization.md
-│   │   ├── ADR-003-dual-protocol-api-auto-detection.md
-│   │   ├── ADR-005-cfg-test-mock-injection.md
-│   │   └── superseded/             # Historical ADRs kept for traceability
-│   │       ├── ADR-004-runtime-seam-headless-first.md
-│   │       └── ADR-017-append-terminal-single-session.md
-│   └── dev/
-│       └── manifest-strategy.md   # TDM operational guide (how)
+│   ├── book.toml                  # mdBook configuration (Pages source)
+│   └── src/                       # mdBook content only
 ├── TASKS/                         # Dispatch manifests and work orders (what + anchor)
+│   ├── ADR-README.md              # ADR index and status tracking
 │   ├── ADR-013-tui-completion-deployment-plan.md
 │   ├── ADR-018-managed-tui-scrollback-streaming-cell-overlays.md
 │   ├── ADR-019-adr-018-follow-up-correctness-cutover-cleanup.md
+│   ├── manifest-strategy.md       # TDM operational guide (how)
 │   ├── CRIT-01-protocol.md
 │   ├── CORE-01-sse-parser.md
 │   ├── SEC-01-path-security.md
@@ -153,6 +146,6 @@ vexcoder/
 
 ## 🔗 Reference
 
-- [ADR index](docs/adr/README.md) — architectural decisions and their rationale
-- [Agentic Repair Strategy](docs/dev/manifest-strategy.md) — TDM workflow deep-dive
+- [ADR index](TASKS/ADR-README.md) — architectural decisions and their rationale
+- [Agentic Repair Strategy](TASKS/manifest-strategy.md) — TDM workflow deep-dive
 - [SECURITY.md](SECURITY.md) — vulnerability reporting

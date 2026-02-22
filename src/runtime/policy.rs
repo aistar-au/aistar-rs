@@ -141,7 +141,7 @@ mod tests {
     fn test_request_requires_tool_evidence_detects_repo_facts() {
         let policy = default_runtime_policy();
         assert!(policy.request_requires_tool_evidence("how many files are in this tree"));
-        assert!(policy.request_requires_tool_evidence("what's in docs/dev/"));
+        assert!(policy.request_requires_tool_evidence("what's in docs/src/"));
         assert!(!policy.request_requires_tool_evidence("say hello"));
     }
 }
