@@ -3,6 +3,14 @@
 This is the full sequence across all tracks. Docs and TUI are independent
 tracks, so they can run in parallel across teams or sessions.
 
+## Active ADR Dispatch Manifests
+
+Uncompleted dispatch ADRs live in `TASKS/` root.
+
+1. `TASKS/ADR-013-tui-completion-deployment-plan.md`
+2. `TASKS/ADR-018-managed-tui-scrollback-streaming-cell-overlays.md`
+3. `TASKS/ADR-019-adr-018-follow-up-correctness-cutover-cleanup.md`
+
 ## Manifests Added In This Wave (6 Files)
 
 1. `TASKS/ADR-013-tui-completion-deployment-plan.md`

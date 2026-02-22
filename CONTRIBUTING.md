@@ -2,6 +2,7 @@
 
 > **Version:** This workflow applies from `v0.1.0-alpha` onward.  
 > **Architecture decisions** live in [`docs/adr/`](docs/adr/README.md).  
+> **Dispatch ADRs not yet completed** live in [`TASKS/`](TASKS/README.md) as `TASKS/ADR-XXX-*.md`.  
 > The ADRs explain *why* the project is structured this way. Read them before opening a PR.
 
 ---
@@ -11,6 +12,7 @@
 `vexcoder` uses the **Test-Driven Manifest (TDM)** strategy for all bug fixes, features, and refactors. The full rationale is in [ADR-001](docs/adr/ADR-001-tdm-agentic-manifest-strategy.md). The short version:
 
 1. **Identify task** — Check `TASKS/` for open items.
+   - This includes active dispatch ADR manifests (`TASKS/ADR-XXX-*.md`).
 2. **Anchor test** — Every task has exactly one failing Rust test before work begins. No anchor, no dispatch.
 3. **Module isolation** — Work is confined to the `Target File` named in the task manifest (± one helper file).
 4. **Verification** — Success is `cargo test <anchor_name>` passing, plus `cargo test --all-targets` showing no regressions.
@@ -125,7 +127,10 @@ vexcoder/
 │   │       └── ADR-017-append-terminal-single-session.md
 │   └── dev/
 │       └── manifest-strategy.md   # TDM operational guide (how)
-├── TASKS/                         # Work orders (what + anchor)
+├── TASKS/                         # Dispatch manifests and work orders (what + anchor)
+│   ├── ADR-013-tui-completion-deployment-plan.md
+│   ├── ADR-018-managed-tui-scrollback-streaming-cell-overlays.md
+│   ├── ADR-019-adr-018-follow-up-correctness-cutover-cleanup.md
 │   ├── CRIT-01-protocol.md
 │   ├── CORE-01-sse-parser.md
 │   ├── SEC-01-path-security.md

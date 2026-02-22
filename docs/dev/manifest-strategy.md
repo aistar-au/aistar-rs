@@ -13,6 +13,8 @@ Large Language Models (LLMs) perform best when given **narrow focus** and **bina
 ### 1. The Task Manifest (`TASKS/`)
 Every significant bug fix or feature starts as a file in the `TASKS/` directory. 
 - **File Naming:** `ID-short-description.md` (e.g., `CRIT-01-protocol.md`).
+- **Dispatch ADR Naming:** Active architecture dispatch manifests use `ADR-XXX-*.md`
+  and live in `TASKS/` until completed.
 - **Content:** Must define the **Target File** and the **Definition of Done**.
 - **Context Management:** Task files should never exceed 2k tokens.
 
@@ -92,6 +94,9 @@ Current highlights include:
 
 If new work is opened, create manifests in `TASKS/` root first, then promote to
 `TASKS/completed/` after verification.
+
+If the work item is an ADR dispatch, keep it in `TASKS/ADR-XXX-*.md` while open.
+After acceptance, keep the long-term architecture record in `docs/adr/`.
 
 ## 🔒 Security Design: Lexical + Canonical Guard
 In **SEC-01**, we avoid using `std::fs::canonicalize()` on non-existent target paths, but we do use canonicalization for guard checks on existing paths.

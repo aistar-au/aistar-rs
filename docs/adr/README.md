@@ -6,22 +6,24 @@ This directory captures *why* significant decisions were made in `vexcoder`. ADR
 
 | File | Purpose | Audience |
 | :--- | :--- | :--- |
-| `docs/adr/ADR-XXX-*.md` | Why an architecture exists | Humans and agents reading context |
-| `TASKS/ID-*.md` | What to implement and how to verify it | Agents executing a work order |
+| `docs/adr/ADR-XXX-*.md` | Accepted/superseded architecture records (history + rationale) | Humans and agents reading long-term context |
+| `TASKS/ADR-XXX-*.md` | Dispatchable ADR manifests that are still in progress | Agents executing active architecture work |
+| `TASKS/ID-*.md` | Non-ADR work orders and verification manifests | Agents executing a work order |
 | `CONTRIBUTING.md` | How the workflow operates | All contributors |
 
-A task manifest may reference an ADR. An ADR may spawn one or more tasks. They are complementary, not redundant.
+A dispatchable ADR lives in `TASKS/` until completed. After acceptance, its
+architectural record belongs in `docs/adr/` (or `docs/adr/superseded/`).
 
 ## Status vocabulary
 
 | Status | Meaning |
 | :--- | :--- |
-| **Proposed** | Under discussion, not yet binding |
+| **Proposed** | Under discussion, not yet binding (dispatch file lives in `TASKS/`) |
 | **Accepted** | In effect — code must conform |
 | **Superseded by ADR-XXX** | Replaced; kept for history |
 | **Deprecated** | Was accepted, no longer applies |
 
-## Index
+## Accepted ADR Records
 
 | ADR | Title | Status |
 | :--- | :--- | :--- |
@@ -39,8 +41,16 @@ A task manifest may reference an ADR. An ADR may spawn one or more tasks. They a
 | [ADR-014](ADR-014-runtime-core-policy-dedup-and-enforcement.md) | Runtime-core policy deduplication and enforcement | Accepted |
 | [ADR-015](ADR-015-local-endpoint-text-protocol-default.md) | Local endpoint text-protocol default for tool loop reliability | Accepted |
 | [ADR-016](ADR-016-local-tool-loop-guard-and-correction.md) | Local tool-loop guard and correction path | Accepted |
-| [ADR-018](ADR-018-managed-tui-scrollback-streaming-cell-overlays.md) | Managed TUI scrollback, streaming cell, overlays | Proposed |
-| [ADR-019](ADR-019-adr-018-follow-up-correctness-cutover-cleanup.md) | ADR-018 follow-up sequencing for correctness, cutover, and cleanup | Proposed |
+
+## Dispatch ADR Manifests (Open)
+
+Active (uncompleted) ADR dispatch files live in `TASKS/`.
+
+| ADR | Title | Location | Status |
+| :--- | :--- | :--- | :--- |
+| [ADR-013](../../TASKS/ADR-013-tui-completion-deployment-plan.md) | TUI completion and deployment plan | `TASKS/` | Proposed |
+| [ADR-018](../../TASKS/ADR-018-managed-tui-scrollback-streaming-cell-overlays.md) | Managed TUI scrollback, streaming cell, overlays | `TASKS/` | Proposed |
+| [ADR-019](../../TASKS/ADR-019-adr-018-follow-up-correctness-cutover-cleanup.md) | ADR-018 follow-up sequencing for correctness, cutover, and cleanup | `TASKS/` | Proposed |
 
 ## Superseded ADRs
 
