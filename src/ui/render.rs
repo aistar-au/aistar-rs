@@ -268,7 +268,7 @@ fn modal_content(
                 "Tool Permission",
                 Color::Yellow,
                 body,
-                "y/1 approve once   a/2 approve session   n/3/esc deny",
+                "1 yes   2 allow this session   3/esc cancel",
             )
         }
     }

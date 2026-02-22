@@ -322,6 +322,55 @@ for the exact commit that closes the checklist item.
   - Hardened managed TUI startup noise filtering to ignore transcript/test-output paste artifacts that contaminate first-turn input and make sessions look uncleared.
   - Added binary tests for transcript signature detection to prevent regressions.
 
+### Tool Approval Follow-up - Mandatory overlay for mutating tools in local mode
+- Dispatcher: codex-gpt5
+- Commit: pending (pre-commit review requested)
+- Files changed:
+  - `src/state/conversation.rs` (+80 -2)
+  - `src/ui/render.rs` (+1 -1)
+- Line references:
+  - `src/state/conversation.rs:515`
+  - `src/state/conversation.rs:1544`
+  - `src/state/conversation.rs:1643`
+  - `src/state/conversation.rs:2245`
+  - `src/ui/render.rs:271`
+- Validation:
+  - `cargo test --all-targets` : pass
+- Notes:
+  - Mutating tools (`write_file`, `edit_file`, `rename_file`, `git_add`, `git_commit`) now always require tool approval overlay even when `VEX_TOOL_CONFIRM=off` on local endpoints.
+  - Read-only tool behavior is unchanged unless global tool confirmation is explicitly enabled.
+  - Tool permission overlay shortcut copy now explicitly shows `1 yes`, `2 allow this session`, `3/esc cancel`.
+
+### Tool Reliability Follow-up - Prevent edit_file no-op loops and accept alias arguments
+- Dispatcher: codex-gpt5
+- Commit: pending (pre-commit review requested)
+- Files changed:
+  - `src/state/conversation.rs` (+246 -17)
+  - `src/tool_preview.rs` (+51 -11)
+  - `src/ui/render.rs` (+1 -1)
+- Line references:
+  - `src/state/conversation.rs:428`
+  - `src/state/conversation.rs:528`
+  - `src/state/conversation.rs:1096`
+  - `src/state/conversation.rs:1350`
+  - `src/state/conversation.rs:1558`
+  - `src/state/conversation.rs:1627`
+  - `src/state/conversation.rs:2664`
+  - `src/state/conversation.rs:2774`
+  - `src/tool_preview.rs:180`
+  - `src/tool_preview.rs:223`
+  - `src/tool_preview.rs:240`
+  - `src/tool_preview.rs:422`
+  - `src/tool_preview.rs:435`
+  - `src/ui/render.rs:271`
+- Validation:
+  - `cargo test --all-targets` : pass
+  - `cargo clippy --all-targets -- -D warnings` : pass
+- Notes:
+  - Added alias-tolerant argument resolution for tool dispatch so `edit_file` accepts common variants (`file_path`, `old_text`, `new_text`) instead of failing as empty/missing.
+  - Updated tool preview rendering to surface those alias fields in the overlay so users can verify real payloads before approval.
+  - Added a mutating-tool loop guard that stops repeated identical `edit_file`/write-like calls and returns a loop-guard message instead of spinning through repeated approvals.
+
 ## Gating rules
 
 1. Phase 2 cannot start before U4 + D1 are merged and green.

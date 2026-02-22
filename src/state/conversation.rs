@@ -139,6 +139,7 @@ impl ConversationManager {
         let mut saw_any_tool_round = false;
         let mut previous_round_signature: Option<Vec<String>> = None;
         let mut repeated_read_only_rounds = 0usize;
+        let mut repeated_mutating_rounds = 0usize;
         let mut repeated_round_nudge_used = false;
         let mut last_assistant_text_for_history = String::new();
         loop {
@@ -415,16 +416,27 @@ impl ConversationManager {
             if !tool_use_blocks.is_empty() {
                 saw_any_tool_round = true;
                 let current_signature = tool_round_signature(&tool_use_blocks);
-                if is_read_only_tool_round(&tool_use_blocks)
-                    && previous_round_signature
-                        .as_ref()
-                        .is_some_and(|previous| previous == &current_signature)
-                {
+                let repeated_signature = previous_round_signature
+                    .as_ref()
+                    .is_some_and(|previous| previous == &current_signature);
+                if is_read_only_tool_round(&tool_use_blocks) && repeated_signature {
                     repeated_read_only_rounds += 1;
                 } else {
                     repeated_read_only_rounds = 0;
                 }
+
+                if is_mutating_tool_round(&tool_use_blocks) && repeated_signature {
+                    repeated_mutating_rounds += 1;
+                } else {
+                    repeated_mutating_rounds = 0;
+                }
                 previous_round_signature = Some(current_signature);
+
+                if repeated_mutating_rounds >= 1 {
+                    return Ok(render_repeated_mutating_tool_guard_message(
+                        &assistant_text_for_history,
+                    ));
+                }
 
                 if repeated_read_only_rounds >= 2 {
                     if !repeated_round_nudge_used && rounds < max_tool_rounds {
@@ -439,6 +451,7 @@ impl ConversationManager {
             } else {
                 previous_round_signature = None;
                 repeated_read_only_rounds = 0;
+                repeated_mutating_rounds = 0;
             }
 
             let assistant_history_text = assistant_history_source;
@@ -512,14 +525,17 @@ impl ConversationManager {
             let mut text_protocol_tool_results = Vec::new();
             for block in tool_use_blocks {
                 if let ContentBlock::ToolUse { id, name, input } = block {
-                    if use_structured_blocks && require_tool_approval {
+                    let tool_requires_approval =
+                        require_tool_approval || tool_requires_confirmation(&name);
+
+                    if use_structured_blocks && tool_requires_approval {
                         self.set_tool_call_status(
                             &id,
                             ToolStatus::WaitingApproval,
                             stream_delta_tx,
                         );
                     }
-                    let approved = if require_tool_approval {
+                    let approved = if tool_requires_approval {
                         self.request_tool_approval(&name, &input, stream_delta_tx)
                             .await
                     } else {
@@ -1076,25 +1092,60 @@ fn execute_tool_dispatch(
 
     match name {
         "read_file" => {
-            let path = required_tool_string(input, name, "path")?;
+            let path =
+                required_tool_string_any(input, name, "path", &["path", "file_path", "file"])?;
             tool_operator.read_file(path)
         }
         "write_file" => {
-            let path = required_tool_string(input, name, "path")?;
+            let path =
+                required_tool_string_any(input, name, "path", &["path", "file_path", "file"])?;
+            let content = first_tool_string(input, &["content", "text"]).unwrap_or("");
             tool_operator
-                .write_file(path, get_str("content"))
+                .write_file(path, content)
                 .map(|_| format!("Successfully wrote to {path}"))
         }
         "edit_file" => {
-            let path = required_tool_string(input, name, "path")?;
-            let old_str = required_tool_string(input, name, "old_str")?;
+            let path = required_tool_string_any(
+                input,
+                name,
+                "path",
+                &["path", "file_path", "file", "filename"],
+            )?;
+            let old_str = required_tool_string_any(
+                input,
+                name,
+                "old_str",
+                &["old_str", "old_text", "old_string", "find", "search"],
+            )?;
+            let new_str = first_tool_string(
+                input,
+                &[
+                    "new_str",
+                    "new_text",
+                    "new_string",
+                    "replace",
+                    "replace_with",
+                    "replacement",
+                ],
+            )
+            .unwrap_or("");
             tool_operator
-                .edit_file(path, old_str, get_str("new_str"))
+                .edit_file(path, old_str, new_str)
                 .map(|_| format!("Successfully edited {path}"))
         }
         "rename_file" => {
-            let old_path = required_tool_string(input, name, "old_path")?;
-            let new_path = required_tool_string(input, name, "new_path")?;
+            let old_path = required_tool_string_any(
+                input,
+                name,
+                "old_path",
+                &["old_path", "from", "source_path"],
+            )?;
+            let new_path = required_tool_string_any(
+                input,
+                name,
+                "new_path",
+                &["new_path", "to", "target_path"],
+            )?;
             tool_operator.rename_file(old_path, new_path)
         }
         "list_files" | "list_directory" => tool_operator.list_files(
@@ -1116,8 +1167,18 @@ fn execute_tool_dispatch(
         ),
         "git_log" => tool_operator.git_log(get_usize("max_count", 10)),
         "git_show" => tool_operator.git_show(required_tool_string(input, name, "revision")?),
-        "git_add" => tool_operator.git_add(required_tool_string(input, name, "path")?),
-        "git_commit" => tool_operator.git_commit(required_tool_string(input, name, "message")?),
+        "git_add" => tool_operator.git_add(required_tool_string_any(
+            input,
+            name,
+            "path",
+            &["path", "file_path", "file"],
+        )?),
+        "git_commit" => tool_operator.git_commit(required_tool_string_any(
+            input,
+            name,
+            "message",
+            &["message", "msg", "commit_message"],
+        )?),
         _ => bail!("Unknown tool: {name}"),
     }
 }
@@ -1277,6 +1338,24 @@ fn required_tool_string<'a>(
         .unwrap_or("");
     if value.is_empty() {
         bail!("{tool} requires a non-empty '{key}' string argument");
+    }
+    Ok(value)
+}
+
+fn first_tool_string<'a>(input: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| input.get(*key).and_then(|v| v.as_str()))
+}
+
+fn required_tool_string_any<'a>(
+    input: &'a serde_json::Value,
+    tool: &str,
+    canonical_key: &str,
+    keys: &[&str],
+) -> Result<&'a str> {
+    let value = first_tool_string(input, keys).map(str::trim).unwrap_or("");
+    if value.is_empty() {
+        bail!("{tool} requires a non-empty '{canonical_key}' string argument");
     }
     Ok(value)
 }
@@ -1476,6 +1555,13 @@ fn render_repeated_tool_guard_message(last_assistant_text: &str) -> String {
     )
 }
 
+fn render_repeated_mutating_tool_guard_message(last_assistant_text: &str) -> String {
+    render_loop_guard_message(
+        last_assistant_text,
+        "Repeated identical mutating tool calls detected; stopped to prevent an infinite loop. Verify edit_file arguments include path, old_str, and new_str.".to_string(),
+    )
+}
+
 fn render_missing_tool_evidence_guard_message(last_assistant_text: &str) -> String {
     render_loop_guard_message(
         last_assistant_text,
@@ -1536,6 +1622,22 @@ fn is_read_only_tool_round(blocks: &[ContentBlock]) -> bool {
             ContentBlock::ToolUse { name, .. } if is_read_only_tool_name(name)
         )
     })
+}
+
+fn is_mutating_tool_round(blocks: &[ContentBlock]) -> bool {
+    blocks.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolUse { name, .. } if tool_requires_confirmation(name)
+        )
+    })
+}
+
+fn tool_requires_confirmation(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file" | "edit_file" | "rename_file" | "git_add" | "git_commit"
+    )
 }
 
 fn tool_round_signature(blocks: &[ContentBlock]) -> Vec<String> {
@@ -1627,6 +1729,23 @@ data: {"type":"message_stop"}"#
         }];
         let sig_c = tool_round_signature(&changed_read_round);
         assert_ne!(sig_a, sig_c);
+    }
+
+    #[test]
+    fn test_tool_requires_confirmation_for_mutating_tools() {
+        assert!(tool_requires_confirmation("write_file"));
+        assert!(tool_requires_confirmation("edit_file"));
+        assert!(tool_requires_confirmation("rename_file"));
+        assert!(tool_requires_confirmation("git_add"));
+        assert!(tool_requires_confirmation("git_commit"));
+
+        assert!(!tool_requires_confirmation("read_file"));
+        assert!(!tool_requires_confirmation("search_files"));
+        assert!(!tool_requires_confirmation("list_files"));
+        assert!(!tool_requires_confirmation("git_status"));
+        assert!(!tool_requires_confirmation("git_diff"));
+        assert!(!tool_requires_confirmation("git_log"));
+        assert!(!tool_requires_confirmation("git_show"));
     }
 
     #[tokio::test]
@@ -2215,6 +2334,57 @@ data: {"type":"message_stop"}"#.to_string(),
     }
 
     #[tokio::test]
+    async fn test_mutating_tool_prompts_approval_when_tool_confirm_env_is_off() -> Result<()> {
+        let _env_lock = crate::test_support::ENV_LOCK.lock().await;
+        std::env::set_var("VEX_TOOL_CONFIRM", "off");
+
+        let first_response_sse = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_mut_01","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_mut_01","name":"write_file","input":{"path":"calculator.rs","content":"fn main() {}\n"}}}"#.to_string(),
+            r#"event: content_block_stop
+data: {"type":"content_block_stop","index":0}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":4}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+
+        let second_response_sse = plain_text_round("msg_mut_02", "No changes were applied.");
+        let mock_api_client =
+            ApiClient::new_mock(Arc::new(crate::api::mock_client::MockApiClient::new(vec![
+                first_response_sse,
+                second_response_sse,
+            ])));
+        let mut manager = ConversationManager::new_mock(mock_api_client, HashMap::new());
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tx_for_send = tx.clone();
+        let mut send_future = std::pin::pin!(
+            manager.send_message("create calculator.rs".to_string(), Some(&tx_for_send))
+        );
+        let mut saw_approval_request = false;
+
+        let _ = loop {
+            tokio::select! {
+                result = &mut send_future => break result?,
+                maybe_update = rx.recv() => {
+                    let Some(update) = maybe_update else { continue; };
+                    if let ConversationStreamUpdate::ToolApprovalRequest(request) = update {
+                        saw_approval_request = true;
+                        let _ = request.response_tx.send(false);
+                    }
+                }
+            }
+        };
+
+        std::env::remove_var("VEX_TOOL_CONFIRM");
+        assert!(saw_approval_request);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_local_text_protocol_tool_round_trip() -> Result<()> {
         let first_response_sse = vec![
             r#"event: message_start
@@ -2491,6 +2661,36 @@ data: {"type":"message_stop"}"#.to_string(),
     }
 
     #[tokio::test]
+    async fn test_repeated_mutating_round_returns_guard_message_instead_of_looping() -> Result<()> {
+        let mutating_round = vec![
+            r#"event: message_start
+data: {"type":"message_start","message":{"id":"msg_mut_loop_01","type":"message","role":"assistant","model":"mock-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}"#.to_string(),
+            r#"event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_mut_loop_01","name":"edit_file","input":{"path":"src/calculator.rs","old_str":"","new_str":"x"}}}"#.to_string(),
+            r#"event: content_block_stop
+data: {"type":"content_block_stop","index":0}"#.to_string(),
+            r#"event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":3}}"#.to_string(),
+            r#"event: message_stop
+data: {"type":"message_stop"}"#.to_string(),
+        ];
+
+        let mock_api_client =
+            ApiClient::new_mock(Arc::new(crate::api::mock_client::MockApiClient::new(vec![
+                mutating_round.clone(),
+                mutating_round,
+            ])));
+        let mut manager = ConversationManager::new_mock(mock_api_client, HashMap::new());
+
+        let final_text = manager
+            .send_message("edit calculator".to_string(), None)
+            .await?;
+        assert!(final_text.contains("[loop guard]"));
+        assert!(final_text.contains("Repeated identical mutating tool calls"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_tool_use_without_input_then_partial_json_executes_write_file() -> Result<()> {
         let temp = TempDir::new()?;
 
@@ -2567,6 +2767,35 @@ data: {"type":"message_stop"}"#.to_string(),
             .await
             .expect_err("empty path should be rejected");
         assert!(err.to_string().contains("non-empty 'path'"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_edit_file_accepts_alias_argument_names() -> Result<()> {
+        let temp = TempDir::new()?;
+        let mock_api_client = ApiClient::new_mock(Arc::new(
+            crate::api::mock_client::MockApiClient::new(vec![]),
+        ));
+        let executor = ToolOperator::new(temp.path().to_path_buf());
+        let manager = ConversationManager::new(mock_api_client, executor);
+
+        let target = temp.path().join("src").join("calculator.rs");
+        std::fs::create_dir_all(target.parent().expect("target parent exists"))?;
+        std::fs::write(&target, "pub fn calc() -> i32 { 1 }\n")?;
+
+        manager
+            .execute_tool(
+                "edit_file",
+                &json!({
+                    "file_path": "src/calculator.rs",
+                    "old_text": "1",
+                    "new_text": "2"
+                }),
+            )
+            .await?;
+
+        let updated = std::fs::read_to_string(&target)?;
+        assert!(updated.contains("2"));
         Ok(())
     }
 

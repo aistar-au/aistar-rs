@@ -183,12 +183,25 @@ pub fn preview_edit_file_input(
     diff_indent: &str,
     diff_context_lines: usize,
 ) -> String {
-    let path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<missing>");
-    let old_str = input.get("old_str").and_then(|v| v.as_str()).unwrap_or("");
-    let new_str = input.get("new_str").and_then(|v| v.as_str()).unwrap_or("");
+    let path =
+        first_input_str(input, &["path", "file_path", "file", "filename"]).unwrap_or("<missing>");
+    let old_str = first_input_str(
+        input,
+        &["old_str", "old_text", "old_string", "find", "search"],
+    )
+    .unwrap_or("");
+    let new_str = first_input_str(
+        input,
+        &[
+            "new_str",
+            "new_text",
+            "new_string",
+            "replace",
+            "replace_with",
+            "replacement",
+        ],
+    )
+    .unwrap_or("");
 
     let (old_chars, old_lines) = content_stats(old_str);
     let (new_chars, new_lines) = content_stats(new_str);
@@ -213,11 +226,8 @@ pub fn preview_write_file_input(
     marker: Option<char>,
     max_lines: usize,
 ) -> String {
-    let path = input
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("<missing>");
-    let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let path = first_input_str(input, &["path", "file_path", "file"]).unwrap_or("<missing>");
+    let content = first_input_str(input, &["content", "text"]).unwrap_or("");
     let (chars, lines) = content_stats(content);
 
     let mut out = String::new();
@@ -225,6 +235,11 @@ pub fn preview_write_file_input(
     out.push_str(&format!("content: {chars} chars, {lines} lines\n"));
     out.push_str(&preview_lines(marker, content, max_lines, 1, line_indent));
     out
+}
+
+fn first_input_str<'a>(input: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| input.get(*key).and_then(|value| value.as_str()))
 }
 
 pub fn preview_tool_input(
@@ -401,5 +416,30 @@ mod tests {
             stream,
             "content changed: 9 chars/2 lines -> 10 chars/2 lines"
         );
+    }
+
+    #[test]
+    fn test_preview_edit_file_input_supports_alias_keys() {
+        let input = serde_json::json!({
+            "file_path": "src/calculator.rs",
+            "old_text": "fn old() {}\n",
+            "new_text": "fn new() {}\n",
+        });
+        let preview = preview_edit_file_input(&input, "", "  ", 2);
+        assert!(preview.contains("path: src/calculator.rs"));
+        assert!(preview.contains("change: "));
+        assert!(preview.contains("->"));
+    }
+
+    #[test]
+    fn test_preview_write_file_input_supports_alias_keys() {
+        let input = serde_json::json!({
+            "file_path": "src/calculator.rs",
+            "text": "fn main() {}\n",
+        });
+        let preview = preview_write_file_input(&input, "  ", Some('+'), 10);
+        assert!(preview.contains("path: src/calculator.rs"));
+        assert!(preview.contains("content: "));
+        assert!(preview.contains("lines"));
     }
 }
